@@ -1,165 +1,124 @@
-"""
-wp5_latent_noise_em/run_wp5.py
-================================
-Entry point for Work Package 5.
-
-Experiments
------------
-1. Discard vs. Correct comparison (Proposal §5.3):
-   Grid sweep over η ∈ {2%, 5%, 10%, 20%, 50%} and ε ∈ {0%, 15%, 30%, 45%}.
-   Compare LatentNoiseEM against GraphLP (WP3) and CoTrainer (WP4).
-
-2. Clinical Annotator Bias Audit (Proposal §5.4):
-   On PTB-XL, fit LatentNoiseEM on the real noisy pool and visualise the
-   learned confusion matrix T̂ as a 5×5 heatmap.
-
-3. Synthetic Frobenius Norm Recovery (Proposal §5.4):
-   On the synthetic dataset (from WP2), verify that T̂ converges to T_true
-   as a function of n_U. Report ‖T̂ - T_true‖_F.
-
-Usage
------
-    python run_wp5.py \
-        --features_path ..\outputs\wp1\features.npz \
-        --labels_path   ..\outputs\wp1\labels.npz   \
-        --out_dir       ..\outputs\wp5
-
-Arguments
----------
---features_path  Path to WP1 features.npz
---labels_path    Path to WP1 labels.npz
---out_dir        Output directory
---eta_values     Gold-label fractions
---epsilon_values Noise rates for the grid sweep
---seed           Random seed (default 42)
-"""
-
+"""Run the three WP5 experiments on WP1 features and the WP2 generator."""
 import argparse
-import sys
 from pathlib import Path
+import sys
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
+from threadpoolctl import threadpool_limits
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from wp5_latent_noise_em.latent_noise_em import LatentNoiseEM
 from shared.data_utils import load_standard_split, SUPERCLASSES
-from shared.metrics import evaluate_model, frobenius_error, print_results
+from shared.metrics import evaluate_model, frobenius_error
+from wp2_synthetic_baselines.synthetic_generator import generate_manifold, inject_uniform_noise, inject_asymmetric_noise
+from wp3_graph_propagation.label_propagation import GraphLabelPropagator
+from wp4_cotraining_tsvm.cotraining import CoTrainer
+from wp5_latent_noise_em.latent_noise_em import LatentNoiseEM
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description="WP5 – Latent-Noise EM & Evaluation Suite")
-    p.add_argument("--features_path",  required=True)
-    p.add_argument("--labels_path",    required=True)
-    p.add_argument("--out_dir",        default=str(Path("..") / "outputs" / "wp5"))
-    p.add_argument("--eta_values",     default="0.02,0.05,0.10,0.20,0.50")
-    p.add_argument("--epsilon_values", default="0.0,0.15,0.30,0.45")
-    p.add_argument("--seed",           type=int, default=42)
-    return p.parse_args()
+def heatmap(table, title, xlabel, ylabel, path, difference=False, ranked=()):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    lim = max(abs(table.values).max(), 0.001) if difference else 1
+    im = ax.imshow(table, cmap="RdBu" if difference else "Blues",
+                   vmin=-lim if difference else 0, vmax=lim, aspect="auto")
+    ax.set(xticks=range(len(table.columns)), xticklabels=table.columns,
+           yticks=range(len(table)), yticklabels=table.index, title=title, xlabel=xlabel, ylabel=ylabel)
+    for (i, j), value in np.ndenumerate(table.values):
+        rank = f" (#{ranked.index((i,j))+1})" if (i,j) in ranked else ""
+        ax.text(j, i, f"{value:.3f}{rank}", ha="center", va="center",
+                color="white" if abs(value)>0.65*lim else "black")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
-def inject_uniform_noise(y: np.ndarray, epsilon: float, n_classes: int = 5,
-                         seed: int = 42) -> np.ndarray:
-    """Inject uniform noise into labels (standalone copy so WP5 is self-contained)."""
-    rng = np.random.default_rng(seed)
-    y_noisy = y.copy()
-    for i in range(len(y)):
-        if rng.random() < epsilon:
-            choices = [c for c in range(n_classes) if c != y[i]]
-            y_noisy[i] = rng.choice(choices)
-    return y_noisy
+def run_grid(s, etas, epsilons, out, seed):
+    rows = []
+    for eta in etas:
+        x, _, y, _ = train_test_split(s["X_train_L"], s["y_train_L"], train_size=eta,
+                                      stratify=s["y_train_L"], random_state=seed)
+        def score(model, labels=None):
+            model.fit(x, y, s["X_train_U"], labels)
+            metrics = evaluate_model(model, s["X_val"], s["y_val"])
+            metrics.pop("confusion_matrix")
+            metrics.update({f"f1_{k}": v for k,v in metrics.pop("per_class_f1").items()})
+            if isinstance(model, LatentNoiseEM):
+                metrics.update(em_iterations=model.n_iter_, em_delta=model.delta_)
+            return metrics
+        graph = score(GraphLabelPropagator())
+        co = score(CoTrainer(random_state=seed))
+        for eps in epsilons:
+            noisy = inject_uniform_noise(s["y_train_U"], eps, seed=seed)
+            em = score(LatentNoiseEM(), noisy)
+            for name, metrics in [("EM", em), ("GraphLP", graph), ("CoTrain", co)]:
+                rows.append(dict(eta=eta, epsilon=eps, n_gold=len(y), method=name, **metrics))
+            print(f"eta={eta} eps={eps} n_gold={len(y)} F1 EM={em['macro_f1']} GraphLP={graph['macro_f1']} CoTrain={co['macro_f1']}", flush=True)
+    table = pd.DataFrame(rows)
+    table.to_csv(out/"discard_vs_correct.csv", index=False)
+    pivot = table.pivot(index="eta", columns=["method","epsilon"], values="macro_f1")
+    heatmap(pivot.EM-pivot.GraphLP, "Validation macro F1 difference (EM minus GraphLP)",
+            "Additional pool label corruption", "Fraction of WP1 gold set", out/"discard_vs_correct_heatmap.png", True)
 
 
-def run_discard_vs_correct(
-    X_L_full, y_L_full, X_U, y_U_true,
-    X_val, y_val,
-    eta_values, epsilon_values,
-    out_dir: Path, seed: int = 42,
-):
-    """
-    2D grid sweep: for each (η, ε) pair, compare LatentNoiseEM against baselines.
-
-    TODO for Tanuj (WP5)
-    --------------------
-    For each eta in eta_values:
-        For each epsilon in epsilon_values:
-            1. Subsample Gold Set to fraction eta.
-            2. Inject uniform noise at rate epsilon into y_U.
-            3. Fit LatentNoiseEM(X_L, y_L, X_U, y_U_noisy).
-            4. Also fit GraphLabelPropagator and CoTrainer (import from WP3/WP4).
-            5. Evaluate all three on X_val, y_val.
-            6. Record macro F1 for each method.
-    Save results to discard_vs_correct.csv.
-    Plot: heatmap of EM F1 - GraphLP F1 (positive = EM wins).
-    """
-    raise NotImplementedError("run_discard_vs_correct not yet implemented")
+def run_audit(s, mask, out):
+    model = LatentNoiseEM(max_iter=50).fit(s["X_train_L"], s["y_train_L"], s["X_train_U"][mask], s["y_train_U"][mask])
+    table = pd.DataFrame(model.T_hat_, index=SUPERCLASSES, columns=SUPERCLASSES)
+    table.to_csv(out/"T_hat.csv")
+    ranked = sorted(((i,j) for i,j in np.ndindex(5,5) if i!=j), key=lambda ij: -model.T_hat_[ij])[:3]
+    print(f"Audit: {sum(mask)} pool records, {model.n_iter_} iterations, delta={model.delta_:.6g}\n{table}", flush=True)
+    heatmap(table, "Estimated PTB-XL label transitions", "Observed label", "Latent class", out/"T_hat_heatmap.png", ranked=ranked)
 
 
-def run_clinical_audit(
-    X_L, y_L, X_U, y_U_noisy,
-    out_dir: Path,
-):
-    """
-    Fit LatentNoiseEM on PTB-XL real noisy labels and visualise T̂.
-
-    TODO for Tanuj (WP5)
-    --------------------
-    1. Fit LatentNoiseEM with the real noisy labels.
-    2. Call model.get_confusion_matrix() to retrieve T̂.
-    3. Plot T̂ as a seaborn heatmap with class names as axis labels.
-    4. Annotate the top-3 most confused class pairs.
-    5. Save figure and T_hat as a CSV.
-    """
-    raise NotImplementedError("run_clinical_audit not yet implemented")
-
-
-def run_frobenius_recovery(
-    X_syn, y_syn, T_true: np.ndarray,
-    out_dir: Path, seed: int = 42,
-):
-    """
-    On synthetic data with known T_true, fit LatentNoiseEM for increasing
-    n_U and plot ‖T̂ - T_true‖_F vs. n_U.
-
-    TODO for Tanuj (WP5)
-    --------------------
-    n_U_values = [100, 300, 500, 1000, 2000, 5000]
-    for n_U in n_U_values:
-        subsample n_U points from X_syn, y_syn as the unlabeled pool
-        inject asymmetric noise using T_true
-        fit LatentNoiseEM
-        record frobenius_error(model.T_hat_, T_true)
-    Plot error vs n_U and save.
-    """
-    raise NotImplementedError("run_frobenius_recovery not yet implemented")
+def run_recovery(out, seed):
+    x, y = generate_manifold(5500, seed=seed)
+    truth = np.full((5,5), 0.075)
+    np.fill_diagonal(truth, 0.70)
+    noisy = inject_asymmetric_noise(y[500:], truth, seed=seed+1)
+    rows = []
+    for n in [100,300,500,1000,2000,5000]:
+        model = LatentNoiseEM(max_iter=50).fit(x[:500], y[:500], x[500:500+n], noisy[:n])
+        error = frobenius_error(model.T_hat_, truth)
+        rows.append((n,error,model.n_iter_,model.delta_))
+        print(f"Recovery n={n}, Frobenius error={error:.5f}", flush=True)
+    frame = pd.DataFrame(rows, columns=["n_pool","frobenius_error","em_iterations","em_delta"])
+    frame.to_csv(out/"frobenius_recovery.csv", index=False)
+    ax = frame.plot(x="n_pool", y="frobenius_error", marker="o", legend=False)
+    ax.set(xlabel="Noisy pool size", ylabel="Frobenius error", title="Synthetic transition matrix recovery")
+    ax.figure.tight_layout()
+    ax.figure.savefig(out/"frobenius_recovery.png", dpi=150)
+    plt.close(ax.figure)
 
 
 def main():
-    args = parse_args()
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    split = load_standard_split(
-        args.features_path,
-        args.labels_path,
-        None,
-    )
-
-    eta_values     = [float(v) for v in args.eta_values.split(",")]
-    epsilon_values = [float(v) for v in args.epsilon_values.split(",")]
-
-    print("[WP5] Data loaded.")
-    print(f"[WP5]   Gold Set : {len(split['X_train_L'])} records")
-    print(f"[WP5]   Pool     : {len(split['X_train_U'])} records")
-
-    # TODO: Uncomment and implement once the sub-functions are ready.
-    # run_discard_vs_correct(...)
-    # run_clinical_audit(...)
-    # run_frobenius_recovery(...)   ← requires synthetic data from WP2
-
-    print("[WP5] TODO: implement experiment functions (see README for guidance).")
-    print(f"[WP5] Done. Outputs will be in {out_dir}")
+    p = argparse.ArgumentParser(description=__doc__)
+    for name in ("features_path","labels_path"):
+        p.add_argument("--"+name, required=True)
+    p.add_argument("--meta_path", help="Raw ptbxl_database.csv for automated-only audit")
+    p.add_argument("--out_dir", type=Path, default=Path("../outputs/wp5"))
+    p.add_argument("--eta_values", default="0.02,0.05,0.10,0.20,0.50")
+    p.add_argument("--epsilon_values", default="0,0.15,0.30,0.45")
+    p.add_argument("--seed", type=int, default=42)
+    a = p.parse_args()
+    a.out_dir.mkdir(parents=True, exist_ok=True)
+    s = load_standard_split(a.features_path, a.labels_path)
+    print("Split sizes:", {k:len(v) for k,v in s.items() if k.startswith("X_")}, flush=True)
+    mask = np.ones(len(s["X_train_U"]), dtype=bool)
+    if a.meta_path:
+        z = np.load(a.labels_path)
+        m = pd.read_csv(a.meta_path).set_index("ecg_id").loc[z["ecg_ids"]]
+        if not np.array_equal(m.strat_fold, z["fold"]):
+            raise ValueError("WP1/raw fold mismatch")
+        pool = np.isin(z["fold"], range(1,9)) & ~z["gold_mask"] & (z["y"]!=-1)
+        mask = (m.initial_autogenerated_report.eq(True) & m.validated_by_human.eq(False)).to_numpy()[pool]
+    with threadpool_limits(limits=1):
+        run_recovery(a.out_dir, a.seed)
+        run_audit(s, mask, a.out_dir)
+        run_grid(s, list(map(float,a.eta_values.split(","))), list(map(float,a.epsilon_values.split(","))), a.out_dir, a.seed)
 
 
 if __name__ == "__main__":
