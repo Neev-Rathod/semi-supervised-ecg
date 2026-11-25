@@ -6,13 +6,13 @@ Entry point for Work Package 4: Co-Training & Transductive SVMs.
 Experiments
 -----------
 1. Sweep η (gold fraction) for Multi-View Co-Training:
-   - Compares Co-Training against supervised baselines (Full, View 1, View 2).
-   - Tracks inter-view agreement rate, macro F1, per-class F1, ROC-AUC, and PR-AUC.
+   - Compares Co-Training against supervised baselines (2-View Ensemble, Full 84D, View 1, View 2).
+   - Tracks accuracy, macro F1, per-class F1, ROC-AUC, PR-AUC, and inter-view agreement rate.
 2. Sweep η for Transductive SVM (TSVM):
-   - Compares TSVM against supervised SVM.
-   - Evaluates margin stability, support vector counts, and class imbalance effects.
+   - Compares TSVM against supervised inductive SVM baseline.
+   - Evaluates accuracy, macro F1, margin stability, support vector counts, and class imbalance effects.
 3. Track and visualize inter-view agreement dynamics across co-training rounds.
-4. Analyze margin stability and support vector inflation under severe class imbalance.
+4. Analyze margin stability and support vector distribution under severe class imbalance.
 
 Usage
 -----
@@ -20,16 +20,6 @@ Usage
         --features_path ../outputs/wp1/features.npz \\
         --labels_path   ../outputs/wp1/labels.npz   \\
         --out_dir       ../outputs/wp4
-
-Arguments
----------
---features_path  Path to WP1 features.npz
---labels_path    Path to WP1 labels.npz
---out_dir        Output directory (default: ../outputs/wp4)
---eta_values     Gold-label fractions, e.g. "0.02,0.05,0.10,0.20,0.50"
---seed           Random seed (default: 42)
---max_records    Optional cap on unlabeled records for faster runs
---eval_test      Also evaluate on test set (fold 10) in addition to validation
 """
 
 import argparse
@@ -43,17 +33,21 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-# Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.data_utils import SUPERCLASSES, load_standard_split
-from shared.metrics import evaluate_model, print_results
-from wp4_cotraining_tsvm.cotraining import VIEW1, VIEW2, CoTrainer
+from shared.metrics import evaluate_model
+from wp4_cotraining_tsvm.cotraining import (
+    VIEW1,
+    VIEW2,
+    CoTrainer,
+    _align_proba,
+    _make_base_clf,
+)
 from wp4_cotraining_tsvm.tsvm import TSVMClassifier
 
 
@@ -96,6 +90,22 @@ def subsample_gold(X_L: np.ndarray, y_L: np.ndarray, eta: float, seed: int, stra
     return X_L[idx], y_L[idx]
 
 
+class _TwoViewEnsemble:
+    """Wrapper for supervised 2-view baseline (same architecture as CoTrainer, without X_U)."""
+
+    def __init__(self, h1, h2):
+        self.h1 = h1
+        self.h2 = h2
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        p1 = _align_proba(self.h1, X[:, VIEW1])
+        p2 = _align_proba(self.h2, X[:, VIEW2])
+        return (p1 + p2) / 2.0
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return np.argmax(self.predict_proba(X), axis=1)
+
+
 def run_eta_sweep_cotraining(
     X_L_full: np.ndarray,
     y_L_full: np.ndarray,
@@ -108,12 +118,10 @@ def run_eta_sweep_cotraining(
     X_test: np.ndarray | None = None,
     y_test: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, dict[float, list[dict]]]:
-    """
-    Sweep eta (gold fraction) for Co-Training vs Supervised Baselines.
-    """
-    print("\n" + "=" * 60)
+    """Sweep eta (gold fraction) for Co-Training vs Supervised Baselines."""
+    print("\n" + "=" * 68)
     print("  EXPERIMENT 1: Co-Training η Sweep & View Agreement Analysis")
-    print("=" * 60)
+    print("=" * 68)
 
     rows = []
     agreement_curves = {}
@@ -123,39 +131,37 @@ def run_eta_sweep_cotraining(
         X_L, y_L = subsample_gold(X_L_full, y_L_full, eta, seed=seed)
         n_gold = len(X_L)
 
-        # 1. Supervised Baseline on Full Features (Gold-only)
-        base_full = Pipeline([
-            ("scaler", StandardScaler()),
-            ("lr", LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs", random_state=seed)),
-        ])
+        # 1. Supervised Full-84D Baseline (Gold-only)
+        base_full = _make_base_clf(random_state=seed)
         base_full.fit(X_L, y_L)
         res_base_full = evaluate_model(base_full, X_val, y_val)
+        acc_base_full = float(accuracy_score(y_val, base_full.predict(X_val)))
 
-        # 2. Supervised Baseline on View 1 only
-        base_v1 = Pipeline([
-            ("scaler", StandardScaler()),
-            ("lr", LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs", random_state=seed)),
-        ])
+        # 2. Supervised View 1, View 2, and 2-View Ensemble Baselines (Gold-only)
+        base_v1 = _make_base_clf(random_state=seed)
         base_v1.fit(X_L[:, VIEW1], y_L)
         res_base_v1 = evaluate_model(base_v1, X_val[:, VIEW1], y_val)
 
-        # 3. Supervised Baseline on View 2 only
-        base_v2 = Pipeline([
-            ("scaler", StandardScaler()),
-            ("lr", LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs", random_state=seed)),
-        ])
+        base_v2 = _make_base_clf(random_state=seed)
         base_v2.fit(X_L[:, VIEW2], y_L)
         res_base_v2 = evaluate_model(base_v2, X_val[:, VIEW2], y_val)
 
-        # 4. Multi-View Co-Training
+        base_2v = _TwoViewEnsemble(base_v1, base_v2)
+        res_base_2v = evaluate_model(base_2v, X_val, y_val)
+        acc_base_2v = float(accuracy_score(y_val, base_2v.predict(X_val)))
+
+        # 3. Multi-View Co-Training
         cotrainer = CoTrainer(
-            n_rounds=30,
-            p=5,
-            threshold=0.75,
+            n_rounds=12,
+            p=10,
+            threshold=0.72,
+            pseudo_weight=0.35,
+            non_contradict=True,
             random_state=seed,
         )
         cotrainer.fit(X_L, y_L, X_U)
         res_cotrain = evaluate_model(cotrainer, X_val, y_val)
+        acc_cotrain = float(accuracy_score(y_val, cotrainer.predict(X_val)))
         final_agreement = cotrainer.compute_agreement(X_U)
         agreement_curves[eta] = cotrainer.history_
 
@@ -163,37 +169,43 @@ def run_eta_sweep_cotraining(
             "eta": eta,
             "n_gold": n_gold,
             "n_unlabeled": len(X_U),
+            "cotrain_accuracy": round(acc_cotrain, 4),
             "cotrain_macro_f1": res_cotrain["macro_f1"],
             "cotrain_roc_auc": res_cotrain["roc_auc"],
             "cotrain_pr_auc": res_cotrain["pr_auc"],
             "cotrain_final_agreement": round(final_agreement, 4),
             "cotrain_rounds_run": len(cotrainer.history_),
+            "base_2v_accuracy": round(acc_base_2v, 4),
+            "base_2v_macro_f1": res_base_2v["macro_f1"],
+            "base_full_accuracy": round(acc_base_full, 4),
             "base_full_macro_f1": res_base_full["macro_f1"],
             "base_full_roc_auc": res_base_full["roc_auc"],
             "base_full_pr_auc": res_base_full["pr_auc"],
             "base_v1_macro_f1": res_base_v1["macro_f1"],
             "base_v2_macro_f1": res_base_v2["macro_f1"],
-            "f1_gain_over_base": round(res_cotrain["macro_f1"] - res_base_full["macro_f1"], 4),
+            "acc_gain_over_2v": round(acc_cotrain - acc_base_2v, 4),
+            "f1_gain_over_2v": round(res_cotrain["macro_f1"] - res_base_2v["macro_f1"], 4),
+            "f1_gain_over_full": round(res_cotrain["macro_f1"] - res_base_full["macro_f1"], 4),
         }
 
-        # Add per-class F1
         for cls in SUPERCLASSES:
             row[f"cotrain_f1_{cls}"] = res_cotrain["per_class_f1"].get(cls, 0.0)
-            row[f"base_f1_{cls}"] = res_base_full["per_class_f1"].get(cls, 0.0)
+            row[f"base_f1_{cls}"] = res_base_2v["per_class_f1"].get(cls, 0.0)
 
-        # Optional test set evaluation
         if X_test is not None and y_test is not None:
             res_test = evaluate_model(cotrainer, X_test, y_test)
+            row["test_cotrain_accuracy"] = round(float(accuracy_score(y_test, cotrainer.predict(X_test))), 4)
             row["test_cotrain_macro_f1"] = res_test["macro_f1"]
             row["test_cotrain_roc_auc"] = res_test["roc_auc"]
 
         rows.append(row)
         elapsed = time.time() - t0
         print(
-            f"  [Co-Training] η = {eta:4.2f} ({n_gold:4d} gold) | "
-            f"Base F1: {res_base_full['macro_f1']:.4f} | "
-            f"CoTrain F1: {res_cotrain['macro_f1']:.4f} (Δ {row['f1_gain_over_base']:+.4f}) | "
-            f"Agreement: {final_agreement:.3f} | {elapsed:.1f}s"
+            f"  [Co-Training] η={eta:4.2f} ({n_gold:4d} gold) | "
+            f"Base2V Acc={acc_base_2v:.4f} F1={res_base_2v['macro_f1']:.4f} | "
+            f"CoTrain Acc={acc_cotrain:.4f} ({row['acc_gain_over_2v']:+.4f}) "
+            f"F1={res_cotrain['macro_f1']:.4f} ({row['f1_gain_over_2v']:+.4f}) | "
+            f"Agr={final_agreement:.3f} | {elapsed:.1f}s"
         )
 
     df = pd.DataFrame(rows)
@@ -201,10 +213,7 @@ def run_eta_sweep_cotraining(
     df.to_csv(csv_path, index=False)
     print(f"\n[WP4] Saved Co-Training sweep results to: {csv_path}")
 
-    # Plot 1: F1 vs eta for Co-Training
     plot_f1_vs_eta_cotraining(df, out_dir)
-
-    # Plot 2: Agreement rate across rounds
     plot_view_agreement(agreement_curves, out_dir)
 
     return df, agreement_curves
@@ -222,12 +231,10 @@ def run_eta_sweep_tsvm(
     X_test: np.ndarray | None = None,
     y_test: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """
-    Sweep eta (gold fraction) for TSVM vs Supervised SVM.
-    """
-    print("\n" + "=" * 60)
+    """Sweep eta (gold fraction) for TSVM vs Inductive Supervised SVM."""
+    print("\n" + "=" * 68)
     print("  EXPERIMENT 2: TSVM η Sweep & Margin Stability Analysis")
-    print("=" * 60)
+    print("=" * 68)
 
     rows = []
     sv_breakdowns = []
@@ -237,22 +244,18 @@ def run_eta_sweep_tsvm(
         X_L, y_L = subsample_gold(X_L_full, y_L_full, eta, seed=seed)
         n_gold = len(X_L)
 
-        # Standardize using combined scaler
-        scaler = StandardScaler()
-        scaler.fit(np.vstack([X_L, X_U]))
-        X_L_s = scaler.transform(X_L)
-        X_val_s = scaler.transform(X_val)
-
-        # 1. Supervised SVM Baseline (on Gold Set only)
+        # 1. Inductive Supervised SVM Baseline (scaler fit on Gold Set X_L only)
+        scaler_base = StandardScaler()
+        X_L_b = scaler_base.fit_transform(X_L)
         base_svm = SVC(
             C=1.0,
             kernel="rbf",
+            class_weight="balanced",
             decision_function_shape="ovr",
             random_state=seed,
         )
-        base_svm.fit(X_L_s, y_L)
+        base_svm.fit(X_L_b, y_L)
 
-        # Evaluate base SVM using wrapper interface
         class SVMWrapper:
             def __init__(self, clf, sc):
                 self.clf = clf
@@ -274,47 +277,55 @@ def run_eta_sweep_tsvm(
                 ex = np.exp(sc)
                 return ex / ex.sum(axis=1, keepdims=True)
 
-        res_base_svm = evaluate_model(SVMWrapper(base_svm, scaler), X_val, y_val)
+        base_wrapper = SVMWrapper(base_svm, scaler_base)
+        res_base_svm = evaluate_model(base_wrapper, X_val, y_val)
+        acc_base_svm = float(accuracy_score(y_val, base_wrapper.predict(X_val)))
         base_sv_count = int(np.sum(base_svm.n_support_))
 
-        # 2. Transductive SVM
+        # 2. Transductive SVM (margin-filtered + confidence-weighted + C_U annealing)
         tsvm = TSVMClassifier(
-            C_L=1.0,
-            C_U=0.005,
-            C_U_max=0.5,
+            C_L=2.0,
+            C_U=0.05,
+            C_U_max=0.30,
+            margin_percentile=65.0,
             kernel="rbf",
             max_iter=3,
+            class_weight="balanced",
             random_state=seed,
         )
         tsvm.fit(X_L, y_L, X_U)
         res_tsvm = evaluate_model(tsvm, X_val, y_val)
+        acc_tsvm = float(accuracy_score(y_val, tsvm.predict(X_val)))
         tsvm_sv_count = tsvm.total_support_vectors_
 
         row = {
             "eta": eta,
             "n_gold": n_gold,
             "n_unlabeled": len(X_U),
+            "n_unlabeled_kept": tsvm.n_unlabeled_kept_,
+            "tsvm_accuracy": round(acc_tsvm, 4),
             "tsvm_macro_f1": res_tsvm["macro_f1"],
             "tsvm_roc_auc": res_tsvm["roc_auc"],
             "tsvm_pr_auc": res_tsvm["pr_auc"],
             "tsvm_total_sv": tsvm_sv_count,
+            "base_svm_accuracy": round(acc_base_svm, 4),
             "base_svm_macro_f1": res_base_svm["macro_f1"],
             "base_svm_roc_auc": res_base_svm["roc_auc"],
             "base_svm_pr_auc": res_base_svm["pr_auc"],
             "base_svm_total_sv": base_sv_count,
+            "acc_gain_over_base": round(acc_tsvm - acc_base_svm, 4),
             "f1_gain_over_base": round(res_tsvm["macro_f1"] - res_base_svm["macro_f1"], 4),
         }
 
-        # Record SV counts per class
         for i, cls in enumerate(SUPERCLASSES):
             n_sv_c = int(tsvm.n_support_[i]) if i < len(tsvm.n_support_) else 0
             row[f"tsvm_sv_{cls}"] = n_sv_c
             row[f"tsvm_f1_{cls}"] = res_tsvm["per_class_f1"].get(cls, 0.0)
             row[f"base_f1_{cls}"] = res_base_svm["per_class_f1"].get(cls, 0.0)
 
-        # Optional test evaluation
         if X_test is not None and y_test is not None:
             res_test = evaluate_model(tsvm, X_test, y_test)
+            row["test_tsvm_accuracy"] = round(float(accuracy_score(y_test, tsvm.predict(X_test))), 4)
             row["test_tsvm_macro_f1"] = res_test["macro_f1"]
             row["test_tsvm_roc_auc"] = res_test["roc_auc"]
 
@@ -327,10 +338,11 @@ def run_eta_sweep_tsvm(
 
         elapsed = time.time() - t0
         print(
-            f"  [TSVM]        η = {eta:4.2f} ({n_gold:4d} gold) | "
-            f"Base F1: {res_base_svm['macro_f1']:.4f} | "
-            f"TSVM F1: {res_tsvm['macro_f1']:.4f} (Δ {row['f1_gain_over_base']:+.4f}) | "
-            f"SVs: {tsvm_sv_count} | {elapsed:.1f}s"
+            f"  [TSVM]        η={eta:4.2f} ({n_gold:4d} gold) | "
+            f"BaseSVM Acc={acc_base_svm:.4f} F1={res_base_svm['macro_f1']:.4f} | "
+            f"TSVM Acc={acc_tsvm:.4f} ({row['acc_gain_over_base']:+.4f}) "
+            f"F1={res_tsvm['macro_f1']:.4f} ({row['f1_gain_over_base']:+.4f}) | "
+            f"SVs={tsvm_sv_count} | {elapsed:.1f}s"
         )
 
     df = pd.DataFrame(rows)
@@ -338,49 +350,42 @@ def run_eta_sweep_tsvm(
     df.to_csv(csv_path, index=False)
     print(f"\n[WP4] Saved TSVM sweep results to: {csv_path}")
 
-    # Plot 1: F1 vs eta for TSVM
     plot_f1_vs_eta_tsvm(df, out_dir)
-
-    # Plot 2: Margin stability and support vector inflation under class imbalance
     plot_margin_stability_imbalance(df, sv_breakdowns, out_dir)
 
     return df
 
 
 def plot_f1_vs_eta_cotraining(df: pd.DataFrame, out_dir: Path):
-    """Plot Macro F1 vs Gold Fraction (η) for Co-Training and Baselines."""
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
-
+    """Plot Macro F1 & Accuracy vs Gold Fraction (η) for Co-Training and Baselines."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), dpi=300)
     eta_pct = df["eta"] * 100
 
-    ax.plot(
-        eta_pct, df["cotrain_macro_f1"],
-        marker="o", linewidth=2.5, color="#1f77b4",
-        label="Co-Training (Two-View)",
-    )
-    ax.plot(
-        eta_pct, df["base_full_macro_f1"],
-        marker="s", linewidth=2.0, linestyle="--", color="#2ca02c",
-        label="Supervised Baseline (Full Features, Gold)",
-    )
-    ax.plot(
-        eta_pct, df["base_v1_macro_f1"],
-        marker="^", linewidth=1.5, linestyle=":", color="#ff7f0e", alpha=0.8,
-        label="View 1 Baseline (Temporal / Morphology)",
-    )
-    ax.plot(
-        eta_pct, df["base_v2_macro_f1"],
-        marker="v", linewidth=1.5, linestyle=":", color="#9467bd", alpha=0.8,
-        label="View 2 Baseline (Spectral / Wavelet)",
-    )
+    # Macro F1
+    ax1.plot(eta_pct, df["cotrain_macro_f1"], marker="o", linewidth=2.5, color="#1f77b4", label="Co-Training (Two-View SSL)")
+    ax1.plot(eta_pct, df["base_2v_macro_f1"], marker="s", linewidth=2.0, linestyle="--", color="#2ca02c", label="Supervised 2-View Baseline (Gold)")
+    ax1.plot(eta_pct, df["base_full_macro_f1"], marker="D", linewidth=1.6, linestyle="-.", color="#17becf", alpha=0.85, label="Supervised Full-84D Baseline (Gold)")
+    ax1.plot(eta_pct, df["base_v1_macro_f1"], marker="^", linewidth=1.4, linestyle=":", color="#ff7f0e", alpha=0.8, label="View 1 Only (Temporal)")
+    ax1.plot(eta_pct, df["base_v2_macro_f1"], marker="v", linewidth=1.4, linestyle=":", color="#9467bd", alpha=0.8, label="View 2 Only (Spectral)")
+    ax1.set_title("Co-Training: Macro F1 vs. Gold Fraction (η)", fontsize=12, fontweight="bold")
+    ax1.set_xlabel("Gold Label Fraction η (%)", fontsize=10)
+    ax1.set_ylabel("Macro F1 Score (Validation)", fontsize=10)
+    ax1.set_xticks(eta_pct)
+    ax1.set_xticklabels([f"{v:.0f}%" for v in eta_pct])
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    ax1.legend(frameon=True, fontsize=8.5, loc="lower right")
 
-    ax.set_title("Co-Training: Macro F1 vs. Gold Set Fraction (η)", fontsize=13, fontweight="bold", pad=12)
-    ax.set_xlabel("Gold Label Fraction η (%)", fontsize=11)
-    ax.set_ylabel("Macro F1 Score (Validation Set)", fontsize=11)
-    ax.set_xticks(eta_pct)
-    ax.set_xticklabels([f"{v:.0f}%" for v in eta_pct])
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(frameon=True, fontsize=10, loc="lower right")
+    # Accuracy
+    ax2.plot(eta_pct, df["cotrain_accuracy"] * 100, marker="o", linewidth=2.5, color="#1f77b4", label="Co-Training (Two-View SSL)")
+    ax2.plot(eta_pct, df["base_2v_accuracy"] * 100, marker="s", linewidth=2.0, linestyle="--", color="#2ca02c", label="Supervised 2-View Baseline (Gold)")
+    ax2.plot(eta_pct, df["base_full_accuracy"] * 100, marker="D", linewidth=1.6, linestyle="-.", color="#17becf", alpha=0.85, label="Supervised Full-84D Baseline (Gold)")
+    ax2.set_title("Co-Training: Accuracy vs. Gold Fraction (η)", fontsize=12, fontweight="bold")
+    ax2.set_xlabel("Gold Label Fraction η (%)", fontsize=10)
+    ax2.set_ylabel("Accuracy (%)", fontsize=10)
+    ax2.set_xticks(eta_pct)
+    ax2.set_xticklabels([f"{v:.0f}%" for v in eta_pct])
+    ax2.grid(True, linestyle="--", alpha=0.5)
+    ax2.legend(frameon=True, fontsize=8.5, loc="lower right")
 
     plt.tight_layout()
     plot_path = out_dir / "f1_vs_eta_cotraining.png"
@@ -420,43 +425,38 @@ def plot_view_agreement(curves: dict[float, list[dict]], out_dir: Path):
 
 
 def plot_f1_vs_eta_tsvm(df: pd.DataFrame, out_dir: Path):
-    """Plot Macro F1 vs Gold Fraction (η) for TSVM vs Supervised SVM."""
-    fig, ax1 = plt.subplots(figsize=(8, 5), dpi=300)
-
+    """Plot Macro F1 & Accuracy vs Gold Fraction (η) for TSVM vs Supervised SVM."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), dpi=300)
     eta_pct = df["eta"] * 100
 
-    line1 = ax1.plot(
-        eta_pct, df["tsvm_macro_f1"],
-        marker="o", linewidth=2.5, color="#d62728",
-        label="Transductive SVM (TSVM)",
-    )
-    line2 = ax1.plot(
-        eta_pct, df["base_svm_macro_f1"],
-        marker="s", linewidth=2.0, linestyle="--", color="#1f77b4",
-        label="Supervised SVM Baseline (Gold)",
-    )
-
-    ax1.set_title("Transductive SVM: Macro F1 vs. Gold Set Fraction (η)", fontsize=13, fontweight="bold", pad=12)
-    ax1.set_xlabel("Gold Label Fraction η (%)", fontsize=11)
-    ax1.set_ylabel("Macro F1 Score (Validation Set)", fontsize=11, color="#333333")
+    # Macro F1 + SVs
+    l1 = ax1.plot(eta_pct, df["tsvm_macro_f1"], marker="o", linewidth=2.5, color="#d62728", label="Transductive SVM (TSVM)")
+    l2 = ax1.plot(eta_pct, df["base_svm_macro_f1"], marker="s", linewidth=2.0, linestyle="--", color="#1f77b4", label="Supervised SVM Baseline (Gold)")
+    ax1.set_title("TSVM: Macro F1 vs. Gold Fraction (η)", fontsize=12, fontweight="bold")
+    ax1.set_xlabel("Gold Label Fraction η (%)", fontsize=10)
+    ax1.set_ylabel("Macro F1 Score (Validation)", fontsize=10)
     ax1.set_xticks(eta_pct)
     ax1.set_xticklabels([f"{v:.0f}%" for v in eta_pct])
     ax1.grid(True, linestyle="--", alpha=0.5)
 
-    # Twin axis for Support Vectors
-    ax2 = ax1.twinx()
-    line3 = ax2.plot(
-        eta_pct, df["tsvm_total_sv"],
-        marker="^", linewidth=1.8, linestyle=":", color="#7f7f7f", alpha=0.85,
-        label="TSVM Support Vector Count",
-    )
-    ax2.set_ylabel("Total Support Vectors", fontsize=11, color="#7f7f7f")
-    ax2.tick_params(axis="y", labelcolor="#7f7f7f")
+    ax1_twin = ax1.twinx()
+    l3 = ax1_twin.plot(eta_pct, df["tsvm_total_sv"], marker="^", linewidth=1.6, linestyle=":", color="#7f7f7f", alpha=0.85, label="TSVM Support Vectors")
+    ax1_twin.set_ylabel("Total Support Vectors", fontsize=10, color="#7f7f7f")
+    ax1_twin.tick_params(axis="y", labelcolor="#7f7f7f")
 
-    # Combined legend
-    lines = line1 + line2 + line3
-    labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, frameon=True, fontsize=10, loc="lower right")
+    lines = l1 + l2 + l3
+    ax1.legend(lines, [l.get_label() for l in lines], frameon=True, fontsize=8.5, loc="lower right")
+
+    # Accuracy
+    ax2.plot(eta_pct, df["tsvm_accuracy"] * 100, marker="o", linewidth=2.5, color="#d62728", label="Transductive SVM (TSVM)")
+    ax2.plot(eta_pct, df["base_svm_accuracy"] * 100, marker="s", linewidth=2.0, linestyle="--", color="#1f77b4", label="Supervised SVM Baseline (Gold)")
+    ax2.set_title("TSVM: Accuracy vs. Gold Fraction (η)", fontsize=12, fontweight="bold")
+    ax2.set_xlabel("Gold Label Fraction η (%)", fontsize=10)
+    ax2.set_ylabel("Accuracy (%)", fontsize=10)
+    ax2.set_xticks(eta_pct)
+    ax2.set_xticklabels([f"{v:.0f}%" for v in eta_pct])
+    ax2.grid(True, linestyle="--", alpha=0.5)
+    ax2.legend(frameon=True, fontsize=9, loc="lower right")
 
     plt.tight_layout()
     plot_path = out_dir / "f1_vs_eta_tsvm.png"
@@ -466,23 +466,16 @@ def plot_f1_vs_eta_tsvm(df: pd.DataFrame, out_dir: Path):
 
 
 def plot_margin_stability_imbalance(df: pd.DataFrame, sv_breakdowns: list[dict], out_dir: Path):
-    """
-    Analyse and visualize margin stability and support vector inflation under class imbalance (Proposal §5.2).
-    """
+    """Analyze and visualize margin stability and support vector distribution under class imbalance."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
 
-    # Subplot 1: Support vector count per class across eta in TSVM
     colors = ["#2ca02c", "#d62728", "#1f77b4", "#ff7f0e", "#9467bd"]
     eta_pct = df["eta"] * 100
 
     for i, cls in enumerate(SUPERCLASSES):
         col_name = f"tsvm_sv_{cls}"
         if col_name in df.columns:
-            ax1.plot(
-                eta_pct, df[col_name],
-                marker="o", linewidth=2.0, color=colors[i],
-                label=f"{cls}",
-            )
+            ax1.plot(eta_pct, df[col_name], marker="o", linewidth=2.0, color=colors[i], label=f"{cls}")
 
     ax1.set_title("TSVM Support Vectors per Superclass vs. η", fontsize=12, fontweight="bold")
     ax1.set_xlabel("Gold Label Fraction η (%)", fontsize=10)
@@ -492,7 +485,6 @@ def plot_margin_stability_imbalance(df: pd.DataFrame, sv_breakdowns: list[dict],
     ax1.grid(True, linestyle="--", alpha=0.5)
     ax1.legend(title="Superclass", frameon=True, fontsize=9)
 
-    # Subplot 2: Per-Class F1 comparison at η = 0.10 (representative benchmark)
     rep_row = df[df["eta"] == 0.10]
     if rep_row.empty:
         rep_row = df.iloc[len(df) // 2 : len(df) // 2 + 1]
@@ -516,7 +508,6 @@ def plot_margin_stability_imbalance(df: pd.DataFrame, sv_breakdowns: list[dict],
     ax2.grid(True, linestyle="--", alpha=0.5, axis="y")
     ax2.legend(frameon=True, fontsize=10)
 
-    # Annotate class frequencies
     frequencies = ["NORM (62.5%)", "MI (10.4%)", "STTC (13.9%)", "CD (9.9%)", "HYP (3.3%)"]
     for i, freq in enumerate(frequencies):
         ax2.text(i, 0.03, freq, ha="center", fontsize=7.5, rotation=90, color="white", fontweight="bold")
@@ -533,17 +524,11 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n" + "#" * 65)
+    print("\n" + "#" * 68)
     print("  BITS F464: ML Project - WP4 Co-Training & Transductive SVMs")
-    print("#" * 65)
+    print("#" * 68)
 
-    # 1. Load Data Splits
-    split = load_standard_split(
-        args.features_path,
-        args.labels_path,
-        None,
-    )
-
+    split = load_standard_split(args.features_path, args.labels_path, None)
     X_L_full = split["X_train_L"]
     y_L_full = split["y_train_L"]
     X_U      = split["X_train_U"]
@@ -553,64 +538,54 @@ def main():
     y_test   = split["y_test"] if args.eval_test else None
 
     if args.max_records is not None and args.max_records < len(X_U):
-        print(f"[WP4] Subsampling unlabeled pool to max_records={args.max_records}...")
         rng = np.random.default_rng(args.seed)
         sub_u = rng.choice(len(X_U), size=args.max_records, replace=False)
         X_U = X_U[sub_u]
 
     eta_values = [float(v) for v in args.eta_values.split(",")]
 
-    print(f"[WP4] Loaded dataset successfully:")
-    print(f"[WP4]   Gold Set (D_L)    : {len(X_L_full):5d} records (84 features)")
+    print(f"[WP4] Loaded dataset:")
+    print(f"[WP4]   Gold Set (D_L)     : {len(X_L_full):5d} records (84 features)")
     print(f"[WP4]   Untrusted Pool(D_U): {len(X_U):5d} records")
-    print(f"[WP4]   Validation Set    : {len(X_val):5d} records")
+    print(f"[WP4]   Validation Set     : {len(X_val):5d} records")
     if args.eval_test:
-        print(f"[WP4]   Test Set          : {len(X_test):5d} records")
-    print(f"[WP4]   Gold Fractions (η): {eta_values}")
+        print(f"[WP4]   Test Set           : {len(X_test):5d} records")
+    print(f"[WP4]   Gold Fractions (η) : {eta_values}")
 
-    # 2. Run Co-Training Sweep
     cotrain_df, _ = run_eta_sweep_cotraining(
-        X_L_full=X_L_full,
-        y_L_full=y_L_full,
-        X_U=X_U,
-        X_val=X_val,
-        y_val=y_val,
-        eta_values=eta_values,
-        out_dir=out_dir,
-        seed=args.seed,
-        X_test=X_test,
-        y_test=y_test,
+        X_L_full=X_L_full, y_L_full=y_L_full, X_U=X_U,
+        X_val=X_val, y_val=y_val, eta_values=eta_values,
+        out_dir=out_dir, seed=args.seed, X_test=X_test, y_test=y_test,
     )
 
-    # 3. Run TSVM Sweep
     tsvm_df = run_eta_sweep_tsvm(
-        X_L_full=X_L_full,
-        y_L_full=y_L_full,
-        X_U=X_U,
-        X_val=X_val,
-        y_val=y_val,
-        eta_values=eta_values,
-        out_dir=out_dir,
-        seed=args.seed,
-        X_test=X_test,
-        y_test=y_test,
+        X_L_full=X_L_full, y_L_full=y_L_full, X_U=X_U,
+        X_val=X_val, y_val=y_val, eta_values=eta_values,
+        out_dir=out_dir, seed=args.seed, X_test=X_test, y_test=y_test,
     )
 
-    # 4. Print Summary Comparison Table
-    print("\n" + "=" * 80)
-    print("  WP4 SUMMARY RESULTS TABLE: F1 vs. Gold Fraction (η)")
-    print("=" * 80)
-    print(f"{'η (%)':<8} {'Gold N':<8} {'CoTrain F1':<12} {'Base LR F1':<12} {'Δ CoTrain':<12} {'TSVM F1':<12} {'Base SVM F1':<12} {'Δ TSVM':<12}")
-    print("-" * 80)
+    print("\n" + "=" * 96)
+    print("  WP4 SUMMARY RESULTS TABLE: Accuracy & Macro F1 vs. Gold Fraction (η)")
+    print("=" * 96)
+    print(
+        f"{'η (%)':<7} {'Gold':<6} | "
+        f"{'Base2V(Acc/F1)':<16} {'CoTrain(Acc/F1)':<17} {'Δ(Acc/F1)':<15} | "
+        f"{'BaseSVM(Acc/F1)':<17} {'TSVM(Acc/F1)':<16} {'Δ(Acc/F1)':<15}"
+    )
+    print("-" * 96)
     for eta in eta_values:
-        c_row = cotrain_df[cotrain_df["eta"] == eta].iloc[0]
-        t_row = tsvm_df[tsvm_df["eta"] == eta].iloc[0]
+        c = cotrain_df[cotrain_df["eta"] == eta].iloc[0]
+        t = tsvm_df[tsvm_df["eta"] == eta].iloc[0]
         print(
-            f"{eta*100:<7.1f}% {int(c_row['n_gold']):<8d} "
-            f"{c_row['cotrain_macro_f1']:<12.4f} {c_row['base_full_macro_f1']:<12.4f} {c_row['f1_gain_over_base']:<+12.4f} "
-            f"{t_row['tsvm_macro_f1']:<12.4f} {t_row['base_svm_macro_f1']:<12.4f} {t_row['f1_gain_over_base']:<+12.4f}"
+            f"{eta*100:<6.1f}% {int(c['n_gold']):<6d} | "
+            f"{c['base_2v_accuracy']:.3f}/{c['base_2v_macro_f1']:.3f}      "
+            f"{c['cotrain_accuracy']:.3f}/{c['cotrain_macro_f1']:.3f}       "
+            f"{c['acc_gain_over_2v']:+.3f}/{c['f1_gain_over_2v']:+.3f}   | "
+            f"{t['base_svm_accuracy']:.3f}/{t['base_svm_macro_f1']:.3f}       "
+            f"{t['tsvm_accuracy']:.3f}/{t['tsvm_macro_f1']:.3f}      "
+            f"{t['acc_gain_over_base']:+.3f}/{t['f1_gain_over_base']:+.3f}"
         )
-    print("=" * 80)
+    print("=" * 96)
     print(f"[WP4] All deliverables written to directory: {out_dir}\n")
 
 

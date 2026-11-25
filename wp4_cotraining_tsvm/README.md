@@ -7,10 +7,10 @@
 
 WP4 implements the two margin/multi-view semi-supervised methods from Proposal §4.4–4.5.
 
-- **Co-Training** – trains two classifiers on independent feature views; each one teaches the other using high-confidence unlabeled predictions.
-- **Transductive SVM (TSVM)** – extends standard SVM to treat unlabeled labels as optimization variables, pushing the decision boundary into low-density regions.
+- **Co-Training** – trains two `HistGradientBoostingClassifier` models on independent feature views (temporal vs. spectral); each one teaches the other by adding high-confidence, non-contradicting unlabeled samples as confidence-weighted pseudo-labels.
+- **Transductive SVM (TSVM)** – extends standard SVM to treat unlabeled labels as optimization variables, pushing the decision boundary into low-density regions, with margin-percentile filtering and C_U annealing.
 
-Both methods **discard** the noisy machine-generated labels in D_U (like WP3).
+Both methods **discard** the noisy machine-generated labels in D_U, treating D_U purely as an unlabeled feature distribution.
 
 ---
 
@@ -19,19 +19,19 @@ Both methods **discard** the noisy machine-generated labels in D_U (like WP3).
 | File | Purpose |
 |------|---------|
 | `THEORY.md` | **Theoretical foundations, mathematical derivations & methodology guide** |
-| `run_wp4.py` | **Entry point** |
-| `cotraining.py` | Co-Training with two views (time-domain vs. frequency-domain) |
-| `tsvm.py` | Transductive SVM with iterative label switching + C_U annealing |
+| `run_wp4.py` | **Entry point** – orchestrates all sweeps, baselines, plots, and CSV outputs |
+| `cotraining.py` | Multi-view Co-Training with HGB base clf, non-contradiction filtering, confidence weighting |
+| `tsvm.py` | Transductive SVM with margin-percentile filtering, balanced class weights, C_U annealing |
 | `README.md` | This file |
 
 ---
 
 ## Prerequisites
 
-WP1 must have run:
+WP1 must have run first to produce the feature/label `.npz` files:
 ```bash
 cd wp1_data_pipeline
-python run_wp1.py --data_path D:\ml-project\dataset --out_dir ..\outputs\wp1
+python run_wp1.py --data_path <dataset_path> --out_dir ../outputs/wp1
 ```
 
 ---
@@ -39,206 +39,146 @@ python run_wp1.py --data_path D:\ml-project\dataset --out_dir ..\outputs\wp1
 ## How to Run
 
 ```bash
-cd wp4_cotraining_tsvm
-python run_wp4.py \
-    --features_path ..\outputs\wp1\features.npz \
-    --labels_path   ..\outputs\wp1\labels.npz   \
-    --out_dir       ..\outputs\wp4
+python wp4_cotraining_tsvm/run_wp4.py \
+    --features_path outputs/wp1/features.npz \
+    --labels_path   outputs/wp1/labels.npz   \
+    --out_dir       outputs/wp4 \
+    --eta_values    0.02,0.05,0.10,0.20,0.50 \
+    --eval_test
+```
+
+Expected runtime: ~5–8 minutes (Co-Training: ~2 min, TSVM: ~3 min).
+
+---
+
+## Implementation: Co-Training (`cotraining.py`)
+
+### Key Design Choices (over baseline LR Co-Training)
+
+| Design Decision | Rationale |
+|---|---|
+| `HistGradientBoosting` base clf | Better-calibrated probabilities on small labeled sets (180–900 samples) than Logistic Regression |
+| Non-contradiction filtering | Before h1 adds sample `x` to L2 with label `c`, require h2 also predicts `c`; prevents confirmation bias |
+| Confidence-weighted pseudo-labels | Each pseudo-label has `sample_weight = pseudo_w × conf` (default `pseudo_w=0.35`), downweighting uncertain pseudo-labels relative to gold (weight=1.0) |
+| Per-class top-p selection | Selects at most `p=10` candidates per class, enforcing balanced growth even when NORM dominates |
+| `_align_proba` helper | Safely handles the case where HGB may not have seen all classes at very low η |
+
+### Algorithm Outline
+
+```
+Views: V1 = X[:, 0:42]  (temporal/morphology features)
+       V2 = X[:, 42:84] (spectral/wavelet features)
+
+For round = 1..12:
+    h1.fit(L1_X, L1_y, sample_weight)   # train on View 1
+    h2.fit(L2_X, L2_y, sample_weight)   # train on View 2
+    
+    # h1 → teaches L2 (with non-contradiction from h2)
+    For each class c:
+        candidates = top-p from h1 by p(y=c | x, V1) > threshold=0.72
+        kept = [x for x in candidates if h2.predict(x, V2) == c]
+        Add to L2 with weight = pseudo_w × conf
+    
+    # h2 → teaches L1 (symmetric)
+
+Final predict: average of h1.predict_proba(V1) and h2.predict_proba(V2)
+```
+
+**Baseline (fair comparison):** Same HGB architecture as a 2-view supervised ensemble trained only on D_L split-view data (not the full 84D).
+
+---
+
+## Implementation: TSVM (`tsvm.py`)
+
+### Key Design Choices (over v1 TSVM)
+
+| Design Decision | Rationale |
+|---|---|
+| `margin_percentile=65` filtering | Retains only the top 35% most-confident unlabeled predictions, excluding boundary-uncertain samples from optimization |
+| `C_U_max = min(0.30, 0.8 × N_L/N_U_kept)` | Scales regularization weight to gold/unlabeled ratio; prevents unlabeled noise overwhelming small gold sets |
+| `class_weight='balanced'` on SVC | Counteracts NORM (62.5%) dominating minority classes; prevents HYP/MI from 100% SV inflation |
+| Inductive scaler for baseline | `StandardScaler.fit(X_L only)` for fair comparison; old code leaked X_U scale info into baseline |
+
+### Algorithm Outline
+
+```
+1. Scale X_L → X_L_s using scaler fit on X_L ONLY (inductive, fair baseline)
+2. Baseline SVM: fit balanced SVC(C=C_L=2.0) on X_L_s → evaluate on X_val
+3. Scale X_U using same inductive scaler → X_U_s
+4. Filter X_U: keep top margin_percentile (top 35%) most-confident predictions
+5. Initialize pseudo-labels y_U_hat from base SVM predictions on X_U_filtered
+6. C_U annealing: start C_U=0.005, double each step until C_U_max
+   For each C_U level:
+     a. Fit SVC on (X_L_s, y_L, weight=C_L) ∪ (X_U_filtered, y_U_hat, weight=C_U)
+     b. Inner label switching (max_iter steps): update y_U_hat where clf disagrees
+7. TSVM predict: average decision functions over OvR classifiers via softmax
 ```
 
 ---
 
-## Implementation Guide
+## Actual Experimental Results
 
-### Part A – Co-Training (`cotraining.py`)
+> Results evaluated on the **validation set** (fold 9, n=1,642).  
+> Co-Training Δ is vs. **2-View HGB Ensemble** (fair same-architecture baseline).  
+> TSVM Δ is vs. **Inductive Balanced SVM** (scaler fit on X_L only).
 
-**View definitions** (already in the file):
-```python
-VIEW1 = slice(0, 42)   # time-domain features
-VIEW2 = slice(42, 84)  # frequency-domain features
-```
+### Co-Training vs. 2-View Supervised Ensemble
 
-**`CoTrainer.fit()` step by step:**
+| η (%) | Gold | Base2V Acc | CoTrain Acc | ΔAcc | Base2V F1 | CoTrain F1 | ΔF1 |
+|---|---|---|---|---|---|---|---|
+| 2.0 | 180 | 0.5987 | 0.5871 | −0.012 | 0.3145 | 0.3651 | **+0.051** |
+| 5.0 | 450 | 0.6194 | 0.6261 | **+0.007** | 0.3605 | 0.4310 | **+0.071** |
+| 10.0 | 901 | 0.6291 | 0.6352 | **+0.006** | 0.4039 | 0.4386 | **+0.035** |
+| 20.0 | 1802 | 0.6340 | 0.6401 | **+0.006** | 0.4148 | 0.4326 | **+0.018** |
+| 50.0 | 4505 | 0.6644 | 0.6638 | −0.001 | 0.4782 | 0.4703 | −0.008 |
 
-```python
-def fit(self, X_L, y_L, X_U, y_U_noisy=None):
-    # Split labeled data into views
-    X_L1, X_L2 = X_L[:, VIEW1], X_L[:, VIEW2]
-    X_U1, X_U2 = X_U[:, VIEW1].copy(), X_U[:, VIEW2].copy()
+**Key takeaway:** Co-Training shows strong F1 gains (+5% to +7%) at η=0.02–0.10 where the views are most complementary. The accuracy advantage is also positive at η=0.05–0.20. At η=0.50 (4,505 gold), views become less complementary (more supervised data already covers the space), and the effect tapers off.
 
-    # Initialize labeled pools
-    L1_X, L1_y = X_L1.copy(), y_L.copy()
-    L2_X, L2_y = X_L2.copy(), y_L.copy()
+### TSVM vs. Inductive Balanced SVM
 
-    # Unlabeled pool indices (we track which rows of X_U are still unused)
-    remaining = np.arange(len(X_U))
+| η (%) | Gold | BaseSVM Acc | TSVM Acc | ΔAcc | BaseSVM F1 | TSVM F1 | ΔF1 |
+|---|---|---|---|---|---|---|---|
+| 2.0 | 180 | 0.4951 | 0.5018 | **+0.007** | 0.3830 | 0.3875 | **+0.005** |
+| 5.0 | 450 | 0.5286 | 0.5646 | **+0.036** | 0.4187 | 0.4245 | **+0.006** |
+| 10.0 | 901 | 0.5061 | 0.5889 | **+0.083** | 0.4326 | 0.4584 | **+0.026** |
+| 20.0 | 1802 | 0.5329 | 0.5956 | **+0.063** | 0.4576 | 0.4884 | **+0.031** |
+| 50.0 | 4505 | 0.5591 | 0.5907 | **+0.032** | 0.4962 | 0.4991 | **+0.003** |
 
-    self._h1 = self._clf_fn()
-    self._h2 = self._clf_fn()
-
-    for _ in range(self.n_rounds):
-        if len(remaining) == 0:
-            break
-
-        self._h1.fit(L1_X, L1_y)
-        self._h2.fit(L2_X, L2_y)
-
-        added = []
-
-        # h1 → adds to L2
-        proba1 = self._h1.predict_proba(X_U1[remaining])
-        for c in range(5):
-            conf = proba1[:, c]
-            top_idx = np.argsort(conf)[-self.p:][::-1]
-            top_idx = top_idx[conf[top_idx] > self.threshold]
-            for local_i in top_idx:
-                global_i = remaining[local_i]
-                L2_X = np.vstack([L2_X, X_U2[global_i]])
-                L2_y = np.append(L2_y, c)
-                added.append(global_i)
-
-        # h2 → adds to L1 (symmetric)
-        proba2 = self._h2.predict_proba(X_U2[remaining])
-        for c in range(5):
-            conf = proba2[:, c]
-            top_idx = np.argsort(conf)[-self.p:][::-1]
-            top_idx = top_idx[conf[top_idx] > self.threshold]
-            for local_i in top_idx:
-                global_i = remaining[local_i]
-                L1_X = np.vstack([L1_X, X_U1[global_i]])
-                L1_y = np.append(L1_y, c)
-                added.append(global_i)
-
-        if len(added) == 0:
-            break
-        remaining = np.setdiff1d(remaining, added)
-
-    # Final fit on full pools
-    self._h1.fit(L1_X, L1_y)
-    self._h2.fit(L2_X, L2_y)
-    self._is_fitted = True
-    return self
-```
-
-**`CoTrainer.predict_proba()`:**
-```python
-def predict_proba(self, X):
-    p1 = self._h1.predict_proba(X[:, VIEW1])
-    p2 = self._h2.predict_proba(X[:, VIEW2])
-    return (p1 + p2) / 2
-```
-
-**Inter-view agreement rate** (record this in your sweep):
-```python
-pred1 = self._h1.predict(X_U[:, VIEW1])
-pred2 = self._h2.predict(X_U[:, VIEW2])
-agreement = (pred1 == pred2).mean()
-```
+**Key takeaway:** TSVM shows consistent positive gains in **both Accuracy and F1 across all 5 η values**. The largest accuracy gain is at η=0.10 (+8.3%), where the gold/unlabeled ratio is optimal for the low-density separation principle. The margin-percentile filtering (keeping only the top 35% most-confident unlabeled samples) is critical: it prevents boundary-uncertain minority-class samples from triggering 100% SV inflation (as observed in v1).
 
 ---
 
-### Part B – TSVM (`tsvm.py`)
-
-The TSVM uses **C_U annealing**: start with a very small C_U and double it until C_U == C_U_max. This avoids getting stuck in poor local minima.
-
-**`TSVMClassifier.fit()` step by step:**
-
-```python
-def fit(self, X_L, y_L, X_U, y_U_noisy=None):
-    X_all = np.vstack([X_L, X_U])
-    self._scaler.fit(X_all)
-    X_L_s = self._scaler.transform(X_L)
-    X_U_s = self._scaler.transform(X_U)
-
-    # Step 1: Initial labels for X_U from standard SVM on D_L
-    base_svm = SVC(C=self.C_L, kernel=self.kernel, probability=False)
-    base_svm.fit(X_L_s, y_L)
-    y_U_hat = base_svm.predict(X_U_s)
-
-    C_U = self.C_U
-
-    while C_U <= self.C_U_max:
-        # Build training data: X_L (weight C_L) + X_U (weight C_U)
-        X_train = np.vstack([X_L_s, X_U_s])
-        y_train = np.hstack([y_L, y_U_hat])
-        weights = np.hstack([
-            np.full(len(X_L), self.C_L),
-            np.full(len(X_U), C_U),
-        ])
-
-        # Fit SVM — sklearn's SVC accepts sample_weight
-        clf = SVC(C=1.0, kernel=self.kernel, probability=False,
-                  decision_function_shape="ovr")
-        clf.fit(X_train, y_train, sample_weight=weights)
-
-        # Switching: find beneficial label swaps in X_U
-        changed = True
-        for _ in range(self.max_iter):
-            if not changed:
-                break
-            changed = False
-            df = clf.decision_function(X_U_s)   # (n_U, C) scores
-            # For each unlabeled point, check if the predicted class matches y_U_hat
-            # If a swap of two unlabeled points (one above, one below margin)
-            # improves the objective, perform the swap.
-            # (Simplified: just re-assign any point where clf disagrees with y_U_hat
-            #  and the confidence is high.)
-            new_pred = clf.predict(X_U_s)
-            diff_mask = new_pred != y_U_hat
-            if diff_mask.any():
-                y_U_hat[diff_mask] = new_pred[diff_mask]
-                changed = True
-                clf.fit(X_train, np.hstack([y_L, y_U_hat]),
-                        sample_weight=weights)
-
-        C_U = min(C_U * 2, self.C_U_max + 1e-9)
-
-    self._clf = clf
-    self._is_fitted = True
-    return self
-```
-
-> **Note:** This is a simplified switching implementation. A full Joachims-style TSVM would
-> search for pairs (i, j) with y_i ≠ y_j and both within the margin band and swap them.
-> The simplified version above is sufficient for the project's analysis.
-
----
-
-### Part C – Sweep functions in `run_wp4.py`
-
-Both `run_eta_sweep_cotraining` and `run_eta_sweep_tsvm` follow the same pattern as WP3's `run_eta_sweep`:
-
-```python
-rows = []
-for eta in eta_values:
-    X_L, y_L = subsample_gold(X_L_full, y_L_full, eta, seed)
-    model = CoTrainer(n_rounds=30, p=5, threshold=0.80)
-    model.fit(X_L, y_L, X_U)
-    res = evaluate_model(model, X_val, y_val)
-    rows.append({"eta": eta, "macro_f1": res["macro_f1"]})
-```
-
----
-
-## Expected Output Files
+## Output Files
 
 ```
 outputs/wp4/
-├── cotraining_eta_sweep.csv    ← macro F1 + agreement rate vs. eta
-├── tsvm_eta_sweep.csv          ← macro F1 vs. eta for TSVM
-├── f1_vs_eta_cotraining.png
-├── f1_vs_eta_tsvm.png
-└── view_agreement.png          ← h1/h2 agreement rate over co-training rounds
+├── cotraining_eta_sweep.csv       ← Full metric sweep (Acc, F1, ROC-AUC, PR-AUC, agreement, per-class F1)
+├── tsvm_eta_sweep.csv             ← Full metric sweep (Acc, F1, ROC-AUC, PR-AUC, SV counts, per-class F1)
+├── f1_vs_eta_cotraining.png       ← Dual-panel: F1 and Accuracy vs η for Co-Training
+├── f1_vs_eta_tsvm.png             ← Dual-panel: F1 and Accuracy vs η for TSVM
+├── view_agreement.png             ← h1/h2 inter-view agreement rate across co-training rounds
+└── margin_stability_imbalance.png ← TSVM SV ratio per class across η
 ```
 
 ---
 
-## Key Expected Findings (Proposal §5.3)
+## Key Findings: Why These Methods Work
 
-- Co-Training outperforms gold-only baseline at low η when views are sufficiently independent.
-- As η grows, the gap narrows (more labeled data reduces the advantage of unlabeled exploitation).
-- TSVM is more sensitive to class imbalance than Co-Training; support vector count grows when D_U contains many minority-class examples near the boundary.
-- Inter-view agreement rate rises steadily across rounds (a sign the classifiers are converging).
+### Why Co-Training Works at Low η
+
+At very low label fractions (η=2–10%), the two views (temporal morphology vs. spectral/wavelet) are **conditionally independent given the class label** — a sufficient condition for Blum & Mitchell (1998) guarantees. Each view captures distinct ECG phenomena:
+- **View 1 (0:42):** R-peak amplitudes, QRS durations, T-wave morphology, heart rate
+- **View 2 (42:84):** Fourier magnitudes, Daubechies wavelet energy bands
+
+This conditional independence means h1's confident predictions contain information not yet seen by h2, and vice versa. Non-contradiction filtering (`pred2==c` before h1 adds to L2) prevents the most common failure mode: adding samples where the two views genuinely disagree.
+
+### Why TSVM Works
+
+TSVM exploits the **low-density separation** assumption: class clusters are dense islands separated by sparse gaps. By optimizing the decision boundary to avoid these dense regions of X_U (even when unlabeled), the boundary is forced into the natural inter-cluster gaps rather than cutting through them.
+
+The key improvement over the failed v1 implementation:
+- **v1 problem:** ALL 3,968 unlabeled points included → SVM tries to put the boundary in a gap but the minority-class sparse regions are on the boundary → 100% SV inflation → F1 collapse
+- **v2 fix:** Only the **top 35% most-confident** unlabeled predictions retained → forces the SVM to work only with clearly-separated unlabeled points, preventing boundary collapse for HYP/MI
 
 ---
 
@@ -246,7 +186,7 @@ outputs/wp4/
 
 | Problem | Fix |
 |---------|-----|
-| Co-Training adds no samples | Lower `threshold` to 0.70 or increase `p` |
-| TSVM is very slow on full dataset | Use `--max_records 3000` to test logic, then run full overnight |
-| `predict_proba` not available on SVC | Make sure `probability=True` is set in the base SVC |
-| Memory error | TSVM scales O(N²) with kernel SVM; consider linear kernel (`kernel='linear'`) for large datasets |
+| Co-Training adds no samples | Lower `threshold` to 0.65 or increase `p` to 15 |
+| TSVM slow on large η | TSVM scales ~O(N²) with kernel SVM; linear kernel is faster |
+| Poor TSVM F1 at very low η | Increase `C_L` to 3.0 or raise `margin_percentile` to 70 |
+| `_align_proba` import error | Ensure you are importing from the new `cotraining.py`, not cached `.pyc` |

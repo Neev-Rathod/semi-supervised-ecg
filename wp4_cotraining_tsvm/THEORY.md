@@ -313,50 +313,78 @@ Normal records outnumber Hypertrophy by nearly **19 to 1**.
 
 ---
 
-### 5.2 Support Vector Inflation Phenomenon ($|SV_c| / N_c \to 1.0$)
+### 5.2 Support Vector Inflation: Diagnosis and Fix
 
 In a standard SVM, support vectors are the points that lie strictly on the margin or violate it:
 $$\mathcal{SV} = \{k : y_k (\mathbf{w}^T \phi(\mathbf{x}_k) + b) \le 1\}$$
 For a well-balanced dataset, typical support vector ratios are $20\% \text{ to } 40\%$, meaning only points near the boundary dictate the separating hyperplane while points deep within the interior are irrelevant.
 
-In our experiments with TSVM on PTB-XL, we observed an extreme phenomenon:
+#### 5.2.1 The Original Failure Mode: 100% SV Inflation
 
-> **Empirical Law of Imbalanced Transductive Margins**:  
-> *Across **all** tested gold fractions $\eta \in \{0.02, 0.05, 0.10, 0.20, 0.50\}$, **100% of all labeled samples belonging to the minority classes (MI, STTC, CD, HYP) become active support vectors** ($|SV_c| / N_c = 1.0$).*
+In the initial (v1) TSVM implementation, **all 3,968 unlabeled points** were included without filtering. This caused an extreme failure:
 
-```
-     Empirical Support Vector Ratio (|SV_c| / N_c) by Superclass across η:
-     
-     Class    η = 0.02      η = 0.05      η = 0.10      η = 0.20      η = 0.50
-     ─────    ────────      ────────      ────────      ────────      ────────
-     NORM       48.6%         42.1%         39.8%         37.0%         35.5%
-     MI        100.0%        100.0%        100.0%        100.0%        100.0%
-     STTC      100.0%        100.0%        100.0%        100.0%        100.0%
-     CD        100.0%        100.0%        100.0%        100.0%        100.0%
-     HYP       100.0%        100.0%        100.0%        100.0%        100.0%
-```
+> **Empirical Law of Imbalanced Transductive Margins (v1)**:  
+> *Across **all** tested gold fractions $\eta \in \{0.02, 0.05, 0.10, 0.20, 0.50\}$, **100% of all labeled minority-class samples became active support vectors** ($|SV_c| / N_c = 1.0$).*
 
-#### Why Does This Occur Mathematically?
-1. **The Majority Class Density Pull**:  
-   The regularizer $\|\mathbf{w}\|^2$ penalizes small margins. However, the slack penalty on unlabeled points $\sum_{j \in \mathcal{D}_U} \xi_j^*$ scales with the number of unlabeled records. Since 62.5% of the data belongs to NORM, the unlabeled cluster of NORM exerts a massive gravitational pull on the hyperplane.
-2. **Margin Collapse**:  
-   To avoid cutting through the massive, dense NORM cluster, the optimizer pushes the hyperplane as far away from NORM as possible. This forces the hyperplane directly into the sparse territory of the minority classes (HYP, CD, MI).
-3. **Boundary Inundation**:  
-   Because the boundary is compressed against the minority clusters, **every single minority sample falls within the margin band** ($\mathbf{w}^T \phi(\mathbf{x}) + b < 1$).
-4. Consequently, every minority point becomes an active support vector. The transductive margin completely collapses for the minority classes, leading to near-zero F1 scores for HYP and STTC unless explicit cost-sensitive class balancing is introduced.
+**Why this occurred mathematically:**
+1. **Majority Class Density Pull**: Since 62.5% of the data belongs to NORM, the unlabeled NORM cluster exerts a massive gravitational pull on the hyperplane.
+2. **Margin Collapse**: To avoid cutting through the dense NORM cluster, the optimizer pushes the hyperplane into the sparse territory of minority classes (HYP, CD, MI).
+3. **Boundary Inundation**: Every single minority sample falls within the margin band ($\mathbf{w}^T \phi(\mathbf{x}) + b < 1$), making every minority point an active SV. The transductive margin completely collapses for minority classes, leading to near-zero F1 for HYP and STTC.
+
+#### 5.2.2 The Fixed Implementation: Margin-Percentile Filtering
+
+The v2 TSVM resolves this with **three structural changes**:
+
+**1. Margin-Percentile Filtering (the core fix):**
+
+Instead of including all $|\mathcal{D}_U| = 3968$ unlabeled points, we filter to the **top 35% most confidently predicted** unlabeled samples:
+
+$$\mathcal{D}_U^{\text{filtered}} = \{x_j \in \mathcal{D}_U : \text{margin}(x_j) \ge \text{percentile}_{65}(\{\text{margin}(x_i)\}_{i \in \mathcal{D}_U})\}$$
+
+where $\text{margin}(x_j) = \max_c f_c(x_j) - \text{second\_max}_c f_c(x_j)$ under the initial base SVM.
+
+This prevents the boundary-uncertain minority-class samples near the NORM/MI/HYP overlap region from participating in optimization, dramatically reducing SV inflation.
+
+**2. Adaptive $C_{U,\max}$ scaling:**
+
+$$C_{U,\max} = \min\!\left(0.30,\; 0.8 \cdot \frac{N_L}{|\mathcal{D}_U^{\text{filtered}}|}\right)$$
+
+This ensures the unlabeled regularization weight scales proportionally with the gold/unlabeled ratio. At very low η (η=0.02, $N_L=180$), this caps $C_U$ very aggressively, preventing the unlabeled noise from overwhelming the 180 gold samples.
+
+**3. Balanced class weights:**
+
+The SVC uses `class_weight='balanced'`, which upweights minority classes by $w_c = N / (C \cdot N_c)$. For HYP ($N_c = 10$ at η=0.02), $w_{\text{HYP}} \approx 18\times$ the NORM weight, preventing the optimizer from ignoring the minority clusters.
+
+**Empirical result with the fix:**
+
+| η | BaseSVM Acc | TSVM Acc | ΔAcc | BaseSVM F1 | TSVM F1 | ΔF1 |
+|---|---|---|---|---|---|---|
+| 0.02 | 0.4951 | 0.5018 | **+0.007** | 0.3830 | 0.3875 | **+0.005** |
+| 0.05 | 0.5286 | 0.5646 | **+0.036** | 0.4187 | 0.4245 | **+0.006** |
+| 0.10 | 0.5061 | 0.5889 | **+0.083** | 0.4326 | 0.4584 | **+0.026** |
+| 0.20 | 0.5329 | 0.5956 | **+0.063** | 0.4576 | 0.4884 | **+0.031** |
+| 0.50 | 0.5591 | 0.5907 | **+0.032** | 0.4962 | 0.4991 | **+0.003** |
+
+TSVM now shows **positive gains in both Accuracy and Macro F1 across all 5 η values**, confirming that the low-density separation principle is effective once minority-class boundary samples are excluded from the unlabeled optimization.
 
 ---
 
 ### 5.3 Why Co-Training Resists Imbalance Better than TSVM
 
-Co-Training does not suffer from this severe margin collapse:
+Co-Training does not suffer from this margin collapse for three structural reasons:
+
 1. **Per-Class Candidate Pools**:  
-   In line 4e of the Co-Training algorithm, the selection is parameterized by $p$ **per class**:
+   In each co-training round, the selection is parameterized by $p$ **per class**:
    $$\text{Select top-}p \text{ samples for class } c, \quad \forall c \in \{0, \dots, C-1\}$$
-   Regardless of whether NORM has 2,000 high-confidence candidates and HYP has only 10, the algorithm takes at most $p=5$ candidates for NORM and at most $p=5$ candidates for HYP.
-2. **Implicit Class Balancing**:  
-   This design enforces balanced growth in the labeled pools $L_1$ and $L_2$, preventing the majority class from swamping the decision boundaries of the base logistic regression models.
-3. As a result, Co-Training maintains balanced predictive capacity, achieving **Macro F1 = 0.3777** at $\eta = 0.10$, whereas TSVM collapses to **Macro F1 = 0.1972**.
+   Regardless of whether NORM has 2,000 high-confidence candidates and HYP has only 10, the algorithm takes at most $p=10$ candidates for NORM and at most $p=10$ candidates for HYP. This enforces **balanced pseudo-label growth** even under severe class imbalance.
+
+2. **Non-Contradiction Filtering**:  
+   Before h1 adds a sample with label $c$ to L2, we require that h2 also predicts class $c$ on that sample's view. This prevents confirmation bias: a sample that h1 is confident about STTC but h2 sees as NORM is **rejected**, not added. This design avoids the cascade failure where one view's errors propagate unchecked through the other.
+
+3. **Confidence-Weighted Pseudo-Labels**:  
+   Each pseudo-label has weight $w = \text{pseudo\_w} \times \text{conf}$ where $\text{pseudo\_w} = 0.35$. This downweights uncertain pseudo-labels (e.g., conf=0.75 → w=0.26) relative to gold labels (w=1.0), preventing the minority pseudo-labels from being treated as equivalent to verified gold annotations.
+
+As a result, Co-Training achieves **Macro F1 = 0.4386** at $\eta = 0.10$ (a +0.035 gain over the 2-view supervised baseline of 0.4039), maintaining balanced predictive capacity across all 5 superclasses without geometric boundary collapse.
 
 ---
 
@@ -371,18 +399,22 @@ The theoretical and empirical findings of WP4 provide crucial benchmarks for the
 │ Fundamental Assumption  │ Conditional independence of  │ Low-density separation       │
 │                         │ multiple feature views       │ (margin avoids clusters)     │
 │ Input Requirements      │ 2 independent feature views  │ 1 unified feature space      │
-│ Base Estimator          │ Logistic Regression (L2)     │ Kernel Support Vector Machine│
-│ Unlabeled Handling      │ Discard y~; pseudo-label top-p│ Discard y~; optimize in loss │
+│ Base Estimator          │ HistGradientBoosting (HGB)   │ Balanced SVC (OvR)           │
+│ Unlabeled Handling      │ Discard y~; non-contradiction│ Discard y~; margin-pct filter│
+│                         │ filtering + confidence weighting│ + C_U annealing           │
 │ Convergence Indicator   │ Inter-view agreement rate    │ Support vector count / C_U   │
-│ Resistance to Imbalance │ HIGH (per-class p-capping)   │ POOR (100% minority SV collapse)│
-│ Best Validation F1      │ 0.3777 (η = 0.10)            │ 0.1972 (η = 0.10)            │
-│ Validation ROC-AUC      │ 0.7827                       │ 0.7080                       │
-│ Test Set Macro F1       │ 0.3928 (η = 0.10)            │ 0.2001 (η = 0.10)            │
+│ Resistance to Imbalance │ HIGH (per-class p-capping +  │ MODERATE (balanced weights + │
+│                         │  non-contradiction filter)   │  margin-pct filtering)       │
+│ Best Val Acc vs Base    │ +0.007 (η=0.05)              │ +0.083 (η=0.10)              │
+│ Best Val F1 vs Base     │ +0.071 (η=0.05)              │ +0.031 (η=0.20)              │
+│ Validation F1 at η=0.10 │ 0.4386 (+0.035 vs Base2V)   │ 0.4584 (+0.026 vs BaseSVM)   │
+│ Validation Acc at η=0.10│ 0.6352 (+0.006 vs Base2V)   │ 0.5889 (+0.083 vs BaseSVM)   │
+│ SSL gain direction      │ Positive F1 at η=0.02–0.20  │ Positive both at all 5 η     │
 └─────────────────────────┴──────────────────────────────┴──────────────────────────────┘
 ```
 
 ### Connection to WP5 (Latent-Noise EM):
 In WP5's final comparative synthesis, WP4's results serve as the definitive benchmark for the **"Discard Noisy Labels"** strategy. The project can conclusively demonstrate:
-- When untrusted labels contain structured annotator noise (e.g. over-flagging MI at 28% vs 10%), **Co-Training safely circumvents label noise** by relying on view consensus, yielding a +0.129 F1 gain on MI at $\eta = 0.02$.
-- However, margin-based transductive methods (**TSVM**) are severely compromised by clinical class imbalance.
-- This creates the ideal motivation for **WP5's Latent-Noise EM**, which keeps the noisy labels and mathematically models the confusion matrix $T_{ck} = P(\tilde{y} = k \mid z = c)$ to recover true label posteriors.
+- When untrusted labels contain structured annotator noise (e.g. over-flagging MI at 28% vs 10%), **Co-Training safely circumvents label noise** by relying on view consensus (non-contradiction filtering), yielding up to +0.071 F1 gain at $\eta = 0.05$.
+- **TSVM** also consistently improves over its supervised baseline (positive ΔAcc and ΔF1 at all η values) once margin-percentile filtering and balanced class weights are applied — demonstrating that the low-density separation principle is effective when boundary-uncertain minority-class samples are excluded from optimization.
+- The natural question becomes: **does WP5's Latent-Noise EM, which keeps the noisy labels and models the confusion matrix $T_{ck} = P(\tilde{y} = k \mid z = c)$, achieve even better recovery than the discard paradigm?** WP4's results provide the discard paradigm's upper bound for this comparison.
