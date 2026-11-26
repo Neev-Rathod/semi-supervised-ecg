@@ -49,6 +49,12 @@ python run_wp2.py --mode ptbxl \
     --out_dir       ..\outputs\wp2
 ```
 
+### All mode (runs both synthetic experiments and PTB-XL baselines)
+
+```bash
+python run_wp2.py --mode all --out_dir ..\outputs\wp2
+```
+
 ---
 
 ## Implementation Guide
@@ -119,10 +125,14 @@ Implement `run_breakdown_analysis()`:
 
 ```
 outputs/wp2/
-├── noise_breakdown.csv        ← macro F1 for each model × mode × epsilon
+├── noise_breakdown.csv        ← macro F1 for each model × mode × epsilon (uniform)
 ├── f1_vs_epsilon.png          ← main comparison plot
 ├── svm_support_vectors.png    ← SVM inflation analysis
-└── tree_depth_vs_epsilon.png  ← DT overfitting analysis
+├── tree_depth_vs_epsilon.png  ← DT overfitting analysis
+├── noise_type_comparison.csv  ← Uniform vs. Asymmetric vs. Boundary (Eq. 3.1)
+├── noise_types_comparison.png ← 3-noise-mechanism comparison plot
+├── ptbxl_baselines.csv        ← 3-mode baselines on real PTB-XL across η (val & test)
+└── ptbxl_baselines.png        ← PTB-XL gold_only vs. naive_pool across η
 ```
 
 ---

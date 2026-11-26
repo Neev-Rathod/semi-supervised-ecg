@@ -15,8 +15,8 @@ Classifiers
 5. SVMModel
 
 Training modes (each class supports all three):
-  gold_only    – fit on D_L only
-  naive_pool   – fit on D_L ∪ D_U, treating noisy labels as clean
+  gold_only     – fit on D_L only
+  naive_pool    – fit on D_L ∪ D_U, treating noisy labels as clean
   self_training – iterative self-labelling from D_L
 """
 
@@ -26,6 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.svm import SVC
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
@@ -53,14 +54,13 @@ def self_training_fit(
     above `threshold` to the labeled pool.
     Returns the fitted classifier.
     """
-    # Work with copies so we don't mutate the caller's arrays
     X_labeled = X_L.copy()
     y_labeled = y_L.copy()
     X_unlabeled = X_U.copy()
 
     clf = clone(base_clf)
 
-    for iteration in range(max_iter):
+    for _ in range(max_iter):
         if len(X_unlabeled) == 0:
             break
 
@@ -74,15 +74,12 @@ def self_training_fit(
 
         # 3. Identify rows where max probability > threshold
         confident_mask = max_proba > threshold
-
         if not np.any(confident_mask):
             break
 
         # 4. Move confident samples to the labeled pool
         X_labeled = np.vstack([X_labeled, X_unlabeled[confident_mask]])
         y_labeled = np.hstack([y_labeled, pred_labels[confident_mask]])
-
-        # Remove from unlabeled pool
         X_unlabeled = X_unlabeled[~confident_mask]
 
     # Final fit on the full labeled pool
@@ -124,13 +121,16 @@ class GaussianNaiveBayes(BaseSSLModel):
 
 class LogisticRegressionModel(BaseSSLModel):
 
-    def __init__(self, mode: str = "gold_only", C: float = 1.0):
-        super().__init__(name=f"LR-{mode}")
+    def __init__(self, mode: str = "gold_only", C: float = 1.0, class_weight=None):
+        suffix = "-bal" if class_weight == "balanced" else ""
+        super().__init__(name=f"LR{suffix}-{mode}")
         self.mode = mode
         self._clf = Pipeline([
             ("scaler", StandardScaler()),
-            ("lr", LogisticRegression(C=C, max_iter=1000,
-                                      solver="lbfgs")),
+            ("lr", LogisticRegression(
+                C=C, max_iter=1000, solver="lbfgs",
+                class_weight=class_weight, random_state=42,
+            )),
         ])
 
     def fit(self, X_L, y_L, X_U, y_U_noisy=None):
@@ -188,13 +188,14 @@ class KNNClassifierModel(BaseSSLModel):
 class DecisionTreeModel(BaseSSLModel):
 
     def __init__(self, mode: str = "gold_only",
-                 max_depth: int | None = None):
-        super().__init__(name=f"DT(depth={max_depth})-{mode}")
+                 max_depth: int | None = None, class_weight=None):
+        suffix = "-bal" if class_weight == "balanced" else ""
+        super().__init__(name=f"DT(depth={max_depth}){suffix}-{mode}")
         self.mode = mode
         self.max_depth_param = max_depth
-        self._clf = DecisionTreeClassifier(max_depth=max_depth,
-                                           random_state=42)
-        # Attributes for analysis
+        self._clf = DecisionTreeClassifier(
+            max_depth=max_depth, class_weight=class_weight, random_state=42
+        )
         self.tree_depth_ = None
         self.n_leaves_ = None
 
@@ -207,7 +208,6 @@ class DecisionTreeModel(BaseSSLModel):
             self._clf.fit(X_all, y_all)
         elif self.mode == "self_training":
             self._clf = self_training_fit(self._clf, X_L, y_L, X_U)
-        # Record tree depth and n_leaves for analysis
         self.tree_depth_ = self._clf.get_depth()
         self.n_leaves_ = self._clf.get_n_leaves()
         self._is_fitted = True
@@ -224,15 +224,19 @@ class DecisionTreeModel(BaseSSLModel):
 
 class SVMModel(BaseSSLModel):
 
-    def __init__(self, mode: str = "gold_only", C: float = 1.0):
-        super().__init__(name=f"SVM(C={C})-{mode}")
+    def __init__(self, mode: str = "gold_only", C: float = 1.0, class_weight=None):
+        suffix = "-bal" if class_weight == "balanced" else ""
+        super().__init__(name=f"SVM(C={C}){suffix}-{mode}")
         self.mode = mode
-        # probability=True required for predict_proba
+        base_svc = SVC(
+            C=C, kernel="rbf", class_weight=class_weight,
+            cache_size=500, random_state=42,
+        )
+        # CalibratedClassifierCV(..., ensemble=False) fits 1 final SVC + 3-fold Platt scaling
         self._clf = Pipeline([
             ("scaler", StandardScaler()),
-            ("svm", SVC(C=C, kernel="rbf", probability=True)),
+            ("svm", CalibratedClassifierCV(base_svc, cv=3, ensemble=False)),
         ])
-        # Attribute for analysis
         self.n_support_vectors_ = None
 
     def fit(self, X_L, y_L, X_U, y_U_noisy=None):
@@ -243,14 +247,17 @@ class SVMModel(BaseSSLModel):
             y_all = np.hstack([y_L, y_U_noisy])
             self._clf.fit(X_all, y_all)
         elif self.mode == "self_training":
-            # SVM is slow for self-training; limit iterations
             self._clf = self_training_fit(
                 self._clf, X_L, y_L, X_U,
                 threshold=0.95, max_iter=5,
             )
-        # Record support vector count for analysis
+
         svm_step = self._clf.named_steps.get("svm", self._clf)
-        if hasattr(svm_step, "n_support_"):
+        if hasattr(svm_step, "calibrated_classifiers_") and svm_step.calibrated_classifiers_:
+            est = svm_step.calibrated_classifiers_[0].estimator
+            if hasattr(est, "n_support_"):
+                self.n_support_vectors_ = int(est.n_support_.sum())
+        elif hasattr(svm_step, "n_support_"):
             self.n_support_vectors_ = int(svm_step.n_support_.sum())
         else:
             self.n_support_vectors_ = None

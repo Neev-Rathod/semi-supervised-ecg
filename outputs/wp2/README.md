@@ -9,147 +9,80 @@
 
 ## 1. Overview and Deliverables
 
-WP2 provides two foundational components that all other Work Packages depend on:
+WP2 serves as the **controlled causal diagnostic lab** and **supervised reference floor** for the entire project:
 
-1. **Synthetic Benchmark Dataset** (`synthetic_generator.py`) – a controllable, 5-class manifold dataset with three noise injection functions (uniform, asymmetric, boundary-dependent). Known ground truth enables WP3–WP5 to validate their methods before touching real ECG data.
-
-2. **Five Supervised Baseline Classifiers** (`baselines.py`) – the reference performance floor that semi-supervised methods (WP3–WP5) must beat. Each classifier supports three training modes:
-   - **gold_only** – train only on clean, human-verified labels ($\mathcal{D}_L$)
-   - **naive_pool** – train on $\mathcal{D}_L \cup \mathcal{D}_U$, treating noisy labels as clean
-   - **self_training** – iterative self-labelling starting from $\mathcal{D}_L$
+1. **Synthetic Benchmark Suite (`synthetic_generator.py`)**: A 5-class, 50-dimensional manifold (`10` informative + `5` redundant + `35` ambient noise features, orthogonally projected) with **three noise injectors**: Uniform, Asymmetric pair confusion, and Boundary-Dependent (Proposal Eq. 3.1). Used by WP2 to isolate failure modes and imported by WP5 to prove confusion-matrix recovery against known ground truth $T_{\text{true}}$.
+2. **Five Supervised Baselines (`baselines.py`)**: `GaussianNaiveBayes`, `LogisticRegressionModel`, `KNNClassifierModel`, `DecisionTreeModel`, and `SVMModel` (using deterministic `CalibratedClassifierCV(SVC, cv=3, ensemble=False)`), each supporting three training modes (`gold_only`, `naive_pool`, `self_training`).
+3. **Real PTB-XL Baselines (`ptbxl_baselines.csv`)**: Evaluates all 5 baselines (plus balanced `LR` and `SVM`) across $\eta \in \{2\%, 5\%, 10\%, 20\%, 50\%, 100\%\}$ of WP1's Gold Set against the real hospital Untrusted Pool $\mathcal{D}_U$ on Fold 9 (Val) and Fold 10 (Test).
 
 ### Generated Files in `outputs/wp2/`
 
 | File | Description |
 |------|-------------|
-| `noise_breakdown.csv` | Macro F1, ROC-AUC, PR-AUC for each classifier × mode × ε value (75 rows) |
-| `f1_vs_epsilon.png` | Main comparison: Macro F1 vs. noise rate ε for all 15 model/mode combinations |
-| `svm_support_vectors.png` | SVM support vector count inflation analysis across noise rates |
-| `tree_depth_vs_epsilon.png` | Decision tree overfitting analysis: depth and leaf count for unpruned vs. pruned (max_depth=5) |
-| `README.md` | This technical analysis report |
+| `noise_breakdown.csv` | Synthetic uniform noise sweep: 5 classifiers × 3 modes × $\varepsilon \in \{0, 0.15, 0.30, 0.45, 0.60\}$ |
+| `f1_vs_epsilon.png` | Synthetic uniform breakdown curves (all 15 model/mode combinations) |
+| `svm_support_vectors.png` | SVM support vector inflation under uniform noise |
+| `tree_depth_vs_epsilon.png` | Decision tree overfitting: unpruned vs. pruned (`max_depth=5`) |
+| `noise_type_comparison.csv` | Uniform vs. Asymmetric vs. Boundary-Dependent noise (225 rows with `actual_flip_rate`) |
+| `noise_types_comparison.png` | Side-by-side degradation comparison across all 3 noise mechanisms |
+| `ptbxl_baselines.csv` | Real PTB-XL 3-mode baseline results across $\eta \in [0.02, 1.00]$ (Val & Test) |
+| `ptbxl_baselines.png` | Real PTB-XL `gold_only` vs. `naive_pool` macro F1 across $\eta$ |
+| `README.md` | This technical report |
 
 ---
 
-## 2. Synthetic Dataset Design
+## 2. Synthetic Results: Uniform Breakdown (`noise_breakdown.csv`)
 
-### Generation Method (`generate_manifold`)
+Split: `420` Gold $\mathcal{D}_L$, `1,680` Untrusted $\mathcal{D}_U$ (noise injected *only* into $\mathcal{D}_U$), `450` Validation, `450` Test.
 
-The synthetic benchmark uses `sklearn.datasets.make_classification` with the following configuration:
+| $\varepsilon$ | GNB gold | GNB naive | LR gold | LR naive | kNN gold | kNN naive | DT gold | DT naive | SVM gold | SVM naive | SVM self |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **0.00** | 0.6480 | 0.6487 | 0.6820 | 0.7612 | 0.7406 | 0.8167 | 0.4863 | 0.5817 | 0.8133 | **0.8791** | 0.8133 |
+| **0.15** | 0.6480 | 0.6232 | 0.6820 | 0.7432 | 0.7406 | 0.8103 | 0.4863 | 0.5489 | 0.8133 | **0.8615** | 0.8133 |
+| **0.30** | 0.6480 | 0.6108 | 0.6820 | 0.7070 | 0.7406 | 0.7475 | 0.4863 | 0.4729 | 0.8133 | **0.8660** | 0.8133 |
+| **0.45** | 0.6480 | 0.6074 | 0.6820 | 0.6922 | 0.7406 | 0.6726 | 0.4863 | 0.3510 | 0.8133 | **0.8255** | 0.8133 |
+| **0.60** | 0.6480 | 0.6075 | 0.6820 | 0.6102 | 0.7406 | 0.5953 | 0.4863 | 0.3579 | 0.8133 | **0.8138** | 0.8133 |
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| `n_samples` | 3,000 | Large enough for statistical significance, small enough for fast iteration |
-| `n_features` | 50 | Matches the ambient dimensionality scale of WP1's 84-feature vectors |
-| `n_informative` | 10 | Creates a low-dimensional informative subspace, mimicking real ECG signal structure |
-| `n_redundant` | 5 | Adds correlated features (like correlated lead measurements in ECG) |
-| `n_classes` | 5 | Matches PTB-XL's 5 superclasses (NORM, MI, STTC, CD, HYP) |
-| `class_sep` | 1.0 | Moderate separation — not trivially separable |
-
-After generation, the features are transformed by a random orthogonal projection matrix and injected with Gaussian noise ($\sigma = 0.1$) to simulate the PTB-XL ambient noise structure.
-
-### Data Split
-
-| Split | Samples | Purpose |
-|-------|---------|---------|
-| Training total | 2,100 (70%) | Model training |
-| ↳ Gold Set $\mathcal{D}_L$ | 420 (20% of train) | Clean labels |
-| ↳ Untrusted Pool $\mathcal{D}_U$ | 1,680 (80% of train) | Noise-injected labels |
-| Validation | 450 (15%) | Hyperparameter tuning & reported metrics |
-| Test | 450 (15%) | Held out |
-
-### Noise Injection Functions
-
-Three noise types are implemented following Proposal §3.1:
-
-1. **Uniform Noise** (`inject_uniform_noise`): Each label flips to a uniformly random different class with probability ε. Produces the symmetric transition matrix $T_{ij} = \frac{\varepsilon}{C-1}$ for $i \neq j$.
-
-2. **Asymmetric Noise** (`inject_asymmetric_noise`): Class-conditional noise via a sparse $C \times C$ transition matrix $T$. Default configuration confuses class pairs (0,1) and (2,3) with probability 0.3, simulating clinically realistic confusion patterns (e.g., MI ↔ STTC share similar ST-segment morphology).
-
-3. **Boundary-Dependent Noise** (`inject_boundary_noise`, Proposal Eq. 3.1): Points near the decision boundary have higher flip probability:
-$$P(\text{flip}) = \varepsilon_{\max} \cdot \exp(-\gamma \cdot \text{margin})$$
-where $\text{margin} = P(z=y^*|x) - \max_{c \neq y^*} P(z=c|x)$. A LogisticRegression is trained on clean data to estimate the margin.
+### Key Uniform-Noise Takeaways
+- **Clean sanity check ($\varepsilon=0$):** `naive_pool` beats `gold_only` for all 5 models (`SVM +6.6 pp`, `kNN +7.6 pp`, `LR +7.9 pp`).
+- **Generative resilience vs. Tree overfitting:** `GNB-naive_pool` drops only **6.3%** relative (`0.6487 → 0.6075`), whereas unpruned `DT-naive_pool` drops **38.5%** (`0.5817 → 0.3579`), exploding to `640` leaves (depth `27` at $\varepsilon=0.30$). Pruning (`max_depth=5`) locks complexity at `32` leaves—justifying WP4's shallow `depth=4` trees.
+- **Hidden SVM cost:** Even though `SVM` maintains `0.8138` F1 at $\varepsilon=0.60$, its support vectors inflate sharply (`svm_support_vectors.png`), foreshadowing WP4's TSVM SV growth.
+- **Naive `self_training` fails:** Because `self_training` ignores $\tilde{y}_U$, its curve is flat across $\varepsilon$; worse, on poorly calibrated `GNB` it drops `−8.3 pp` below `gold_only` (`0.6480 → 0.5646`) due to confident self-contamination—motivating WP4's dual-view consensus check.
 
 ---
 
-## 3. Experimental Results
+## 3. All Three Noise Mechanisms (`noise_type_comparison.csv`)
 
-### 3.1 Noise Breakdown Analysis (`noise_breakdown.csv`)
+Comparing `naive_pool` Macro F1 across **Uniform**, **Asymmetric** (confusing pairs `(0,1)` and `(2,3)` at rate $p \in [0, 0.60]$), and **Boundary-Dependent** (Proposal Eq. 3.1, $\gamma = 2.0$, $\varepsilon_{\max} \in [0, 1.0]$):
 
-Experiments sweep ε ∈ {0.00, 0.15, 0.30, 0.45, 0.60} with uniform noise. All 5 classifiers × 3 modes = 15 models are evaluated at each ε level.
+| Noise Type | Max Param | Actual Pool Flips | GNB F1 | LR F1 | kNN F1 | DT F1 | SVM F1 |
+|---|---|---|---|---|---|---|---|
+| **Clean baseline** | `0.0` | `0.0%` | 0.6487 | 0.7612 | 0.8167 | 0.5817 | 0.8791 |
+| **Uniform** | `ε = 0.60` | `60.2%` | 0.6075 | 0.6102 | 0.5953 | 0.3579 | **0.8138** |
+| **Asymmetric** | `p = 0.30` | `24.8%` | 0.6383 | 0.6830 | 0.7225 | 0.5052 | 0.8377 |
+| **Asymmetric** | `p = 0.60` | `48.5%` | **0.4640** | **0.4402** | **0.5052** | 0.3957 | **0.5340** |
+| **Boundary (Eq. 3.1)** | `ε_max = 1.0` | `40.0%` | 0.6126 | 0.6831 | 0.7309 | 0.4977 | 0.7944 |
 
-#### Full Results Table
-
-| ε | GNB gold | GNB naive | GNB self | LR gold | LR naive | LR self | kNN gold | kNN naive | kNN self | DT gold | DT naive | DT self | SVM gold | SVM naive | SVM self |
-|---|----------|-----------|----------|---------|----------|---------|----------|-----------|----------|---------|----------|---------|----------|-----------|----------|
-| **0.00** | 0.648 | 0.649 | 0.565 | 0.682 | 0.761 | 0.681 | 0.741 | **0.817** | 0.731 | 0.486 | 0.582 | 0.487 | 0.811 | **0.879** | 0.817 |
-| **0.15** | 0.648 | 0.623 | 0.565 | 0.682 | 0.743 | 0.681 | 0.741 | 0.810 | 0.731 | 0.486 | 0.549 | 0.487 | 0.811 | **0.866** | 0.822 |
-| **0.30** | 0.648 | 0.611 | 0.565 | 0.682 | 0.707 | 0.681 | 0.741 | 0.748 | 0.731 | 0.486 | 0.473 | 0.487 | 0.811 | **0.869** | 0.816 |
-| **0.45** | 0.648 | 0.607 | 0.565 | 0.682 | 0.692 | 0.681 | 0.741 | 0.673 | 0.731 | 0.486 | 0.351 | 0.487 | 0.811 | **0.826** | 0.822 |
-| **0.60** | 0.648 | 0.608 | 0.565 | 0.682 | 0.610 | 0.681 | 0.741 | 0.595 | 0.731 | 0.486 | 0.358 | 0.487 | 0.811 | **0.812** | 0.805 |
+**Critical Finding:** **Structured asymmetric noise is far deadlier than uniform random noise.** Even at `60.2%` uniform flips, `SVM` (`0.8138`) and `GNB` (`0.6075`) hold up because uniform errors spread across 4 wrong classes, leaving the true class with the plurality. Under `48.5%` asymmetric confusion (`p=0.60`), *every* model collapses (`SVM` drops to `0.5340`, `LR` to `0.4402`, `GNB` to `0.4640`) because confused pairs systematically outvote the truth—directly explaining why WP5 must model the full $C \times C$ confusion matrix $T$. Meanwhile, **Boundary noise** pushes `SVM-naive_pool` (`0.7944`) below `SVM-gold_only` (`0.8133`) at `40%` flips because flips target margin points directly.
 
 ---
 
-## 4. Key Findings and Scientific Analysis
+## 4. Real PTB-XL Supervised Baselines (`ptbxl_baselines.csv`)
 
-### 4.1 Naïve Bayes Degrades Most Gradually Under Noise
+Evaluated on WP1 features (`9,010` Gold, `3,968` real machine-labeled $\mathcal{D}_U$, `1,642` Fold-9 Val, `1,652` Fold-10 Test):
 
-**GNB-naive_pool** drops from 0.649 (ε=0) to 0.608 (ε=0.60), a relative decrease of only **6.3%**. This confirms the proposal's hypothesis: GNB's global density estimation (class-conditional Gaussian means and variances) averages out individual label errors. Each sample has only a marginal effect on the per-class parameter estimates, making the model inherently noise-tolerant.
+| $\eta$ | Gold $N$ | LR (bal) gold | LR (bal) naive | LR naive | GNB gold | GNB naive | kNN gold | kNN naive | SVM (bal) gold | SVM naive |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **2%** | 180 | 0.4032 | **0.4506** | 0.4423 | 0.3618 | 0.2648 | 0.2158 | 0.3631 | 0.1432 | 0.4082 |
+| **5%** | 450 | 0.4013 | **0.4604** | 0.4424 | 0.3712 | 0.2655 | 0.2423 | 0.3741 | 0.2427 | 0.4138 |
+| **10%** | 901 | 0.4220 | **0.4573** | 0.4308 | 0.3610 | 0.2600 | 0.2622 | 0.3776 | 0.2716 | 0.4263 |
+| **20%** | 1802 | 0.4468 | **0.4683** | 0.4227 | 0.3712 | 0.2653 | 0.2787 | 0.3823 | 0.3222 | 0.4350 |
+| **50%** | 4505 | 0.4820 | **0.4911** | 0.4461 | 0.2736 | 0.2630 | 0.3014 | 0.3719 | 0.3645 | 0.4216 |
+| **100%** | 9010 | **0.4943** | 0.4893 | 0.4331 | 0.3405 | 0.2762 | 0.3194 | 0.3817 | 0.3644 | 0.4212 |
 
-### 4.2 Decision Tree (Unpruned) Overfits Most Severely
+*(Values above are Fold-9 validation Macro F1; Fold-10 test metrics are stored in `ptbxl_baselines.csv`.)*
 
-**DT-naive_pool** shows the steepest degradation: from 0.582 (ε=0) to 0.358 (ε=0.60), a **38.5% relative drop**. This is the worst degradation of any classifier.
-
-The tree depth and leaf count analysis confirms the mechanism:
-- **Unpruned trees** (naive_pool) maintain deep, complex structures even as noise increases, memorizing noisy labels rather than learning the true boundary.
-- **Pruned trees** (max_depth=5) have constrained depth and leaf counts that remain stable across all ε values (depth=5, ~32 leaves), confirming that depth constraints prevent overfitting to noise.
-
-### 4.3 SVM Shows Remarkable Resilience, but Support Vectors Inflate
-
-**SVM-naive_pool** degrades from 0.879 to 0.812, a relative drop of only **7.6%** — second-best after GNB. However, the support vector count analysis reveals the hidden cost: as ε increases, more mislabeled boundary points become support vectors, inflating the model complexity without improving generalization. This foreshadows WP4's finding that TSVM struggles with 100% minority-class SV inflation on imbalanced PTB-XL data.
-
-### 4.4 Self-Training: Stable but Conservative
-
-Self-training metrics remain virtually constant across all ε values because self-training **ignores the noisy labels in $\mathcal{D}_U$** and instead uses its own predicted labels. This makes it noise-immune by design. However:
-- It never outperforms naive_pool at ε=0 (more data always helps when labels are clean).
-- At high ε (0.45–0.60), self-training matches or slightly exceeds gold_only, showing that it can safely incorporate some unlabeled data.
-
-### 4.5 At ε=0, naive_pool ≥ gold_only for All Models
-
-This baseline sanity check passes for all 5 classifiers: when untrusted labels are actually clean, adding more data always helps. The largest gain is for SVM (0.811 → 0.879, +6.8pp) and kNN (0.741 → 0.817, +7.6pp), both of which are non-parametric or high-capacity models that benefit most from additional training samples.
-
-### 4.6 Cross-Over Points
-
-The noise level at which gold_only overtakes naive_pool varies by classifier:
-
-| Classifier | Cross-over ε (approx.) | Interpretation |
-|------------|----------------------|----------------|
-| GNB | ~0.45 | Very noise-tolerant |
-| LR | ~0.45–0.60 | Regularization helps |
-| kNN | ~0.30–0.45 | Sensitive to local noise |
-| DT | ~0.30 | Most noise-sensitive |
-| SVM | ~0.60 | Margin-based; very robust |
-
----
-
-## 5. Summary Table for Downstream Comparison (WP5)
-
-| Classifier | Mode | Best Val F1 (ε=0) | F1 at ε=0.30 | F1 at ε=0.60 | Relative Drop (0→0.60) | Key Vulnerability |
-|------------|------|-------------------|--------------|--------------|----------------------|-------------------|
-| **SVM** | naive_pool | **0.879** | **0.869** | 0.812 | 7.6% | Support vector inflation |
-| **kNN** | naive_pool | 0.817 | 0.748 | 0.595 | 27.2% | Local noise sensitivity |
-| **LR** | naive_pool | 0.761 | 0.707 | 0.610 | 19.8% | Moderate: regularization helps |
-| **GNB** | naive_pool | 0.649 | 0.611 | 0.608 | 6.3% | Low capacity limits ceiling |
-| **DT** | naive_pool | 0.582 | 0.473 | 0.358 | 38.5% | Overfitting to noise |
-| **SVM** | gold_only | 0.811 | 0.811 | 0.811 | 0% | Ignores unlabeled data |
-
----
-
-## 6. Implications for WP3–WP5
-
-1. **WP3 (Graph Label Propagation):** Should outperform gold_only baselines (0.811 for SVM, 0.741 for kNN) by leveraging geometric structure to propagate clean labels without being corrupted by noise.
-
-2. **WP4 (Co-Training & TSVM):** Should compare against self_training mode as the most direct baseline. The key question is whether multi-view learning adds value beyond single-view self-training.
-
-3. **WP5 (Latent-Noise EM):** The confusion matrix recovery analysis should target the uniform noise structure used here (symmetric $T$). The EM algorithm should achieve F1 above naive_pool at high ε by modeling the noise transition matrix explicitly.
-
-4. **Overall:** SVM-naive_pool (0.879 at ε=0) sets the ceiling for what supervised methods can achieve with all data. Any semi-supervised method that exceeds this under realistic noise conditions (ε ≥ 0.15) demonstrates genuine value.
+### Key Real-Data Insights
+1. **Why synthetic ≠ real for `GNB`:** While `GNB` tolerated uniform synthetic flips, on real PTB-XL **`GNB-naive_pool` drops ~10 pp across all $\eta$** (`0.3618 → 0.2648` at 2%) because $\mathcal{D}_U$'s `28% MI` class shift corrupts its Gaussian class priors and variances!
+2. **Low-$\eta$ vs. High-$\eta$ trade-off:** When Gold labels are scarce ($\eta = 2\text{–}20\%$), pooling the `3,968` real machine-labeled ECGs gives `LR`, `kNN`, and `SVM` a big data boost (still noisy, yet mostly right). Once Gold reaches `100%` (`9,010`), `LR (bal)-gold_only` (`0.4943` val / `0.4657` test) overtakes `naive_pool` (`0.4893`).
+3. **Self-training consistently hurts on PTB-XL too:** e.g., at $\eta=2\%$, `kNN` drops `0.2158 → 0.1432` and `LR` drops `0.4001 → 0.3545`, confirming single-view pseudo-labeling fails under clinical class overlap.
