@@ -567,71 +567,184 @@
 ]
 
 // =============================================================================
-// SLIDE 08: WP3 — GRAPH LABEL PROPAGATION METHOD & SENSITIVITY
+// SLIDE 08: WP3 — BACKGROUND THEORY: GRAPH LABEL PROPAGATION
 // =============================================================================
-#content-slide("08", "WP3 · Pratyush Somani · Graph SSL", "Harmonic Label Propagation on Locally Scaled k-NN Graphs")[
+#content-slide("08", "WP3 · Pratyush Somani · Background", "From Few Labels to a Graph: Harmonic Label Propagation")[
   #grid(
-    columns: (1fr, 1fr, 1fr),
-    gutter: 1.0em,
-    ruled-col("1 · PREPROCESS & METRIC", accent-col: ink)[
-      #set text(size: 10.0pt)
-      Discard $tilde(y)_U$ completely. Standardize on $cal(D)_L union cal(D)_U$, clip at $plus.minus 5 sigma$, apply PCA (`0–40`), and test *Euclidean*, *Cosine*, and Cholesky *Mahalanobis*.
+    columns: (1fr, 1fr),
+    gutter: 1.2em,
+    ruled-col("THE SETTING & THE QUESTION", accent-col: ink)[
+      #set text(size: 10.2pt)
+      - *Data:* PTB-XL ECGs → 84 features (WP1). Gold set $cal(D)_L$ = `9,010` clean records, Pool $cal(D)_U$ = `3,968` machine-labelled; we reveal only a fraction $eta in {2, 5, 10, 20, 50}%$ of $cal(D)_L$.
+      - *The "discard" strategy:* throw away the Pool's noisy labels $tilde(y)_U$; keep only its *features* as unlabeled points.
+      - *Assumption (cluster / manifold):* ECGs joined by dense paths share a diagnosis.
+      - *Question:* does spreading the few clean labels through the Pool's geometry beat simply training on the Gold labels?
     ],
-    ruled-col("2 · LOCALLY SCALED GRAPH", accent-col: cobalt)[
-      #set text(size: 10.0pt)
-      Build symmetric $k$-NN graph ($k in \{3, 5, 10, 20\}$) with local scaling $sigma_i = d(x_i, x_((7)))$: \
-      $W_(i j) = exp(-d_(i j)^2 slash (sigma_i sigma_j))$
-    ],
-    ruled-col("3 · SPARSE-LU SPREADING", accent-col: forest)[
-      #set text(size: 10.0pt)
-      Clamp Gold labels $Y_L$, solve Zhu et al. (2003) harmonic system across *900 sparse-LU fits*, and score Val/Test via kernel-weighted $k$-NN lookup.
+    ruled-col("THE IDEA: LET LABELS DIFFUSE OVER A k-NN GRAPH", accent-col: cobalt)[
+      #set text(size: 10.2pt)
+      - *Graph:* each ECG is a node, linked to its $k$ nearest neighbours with weight $W_(i j) = exp(-d_(i j)^2 slash (sigma_i sigma_j))$, where $sigma_i$ = distance to the 7th neighbour (adapts to local density).
+      - *Clamp* labeled nodes to their one-hot label $Y_L$; labels flow along edges until every unlabeled node equals the weighted average of its neighbours ("harmonic").
+      - *Random-walk view:* $F_(i c)$ = probability that a walk from node $i$ first reaches a labeled node of class $c$.
+      - *New ECG (val / test):* kernel-weighted average of its $k$ nearest graph nodes.
     ],
   )
 
   #v(0.24em)
   #eq-strip(accent-col: cobalt, bg: cobalt-bg)[
-    #text(size: 11.1pt)[
-      *Harmonic System:* #h(0.5em)
+    #text(size: 10.6pt)[
+      *Minimise* $E(F) = 1/2 sum_(i,j) W_(i j) norm(F_i - F_j)^2$ s.t. $F_L = Y_L$
+      #h(0.6em) ⇒ #h(0.6em) $F_i = 1/D_(i i) sum_j W_(i j) F_j$ #h(0.6em) ⇒ #h(0.6em)
       $F_U^* = (D_"UU" - W_"UU" + 10^(-6) I)^(-1) W_"UL" Y_L$
-      #h(1.0em) · #h(0.5em) *Top Config:* `Euclidean / Mahalanobis, PCA = 5, k = 3` (`0.3054 / 0.3042` mean F1)
     ]
   ]
 
-  #v(0.26em)
-  #fig-frame("plots/wp3_summary.png", height: 6.1cm, caption: [Run 2 sweep (3 distances × 5 PCA dims × 4 k × 5 gold fractions × 3 seeds): small k = 3 and compact PCA = 5 peak consistently.])
+  #v(0.24em)
+  #grid(
+    columns: (1fr, 1fr, 1fr),
+    gutter: 1.0em,
+    ruled-col("1 · PREPROCESS & METRIC", accent-col: ink)[
+      #set text(size: 9.6pt)
+      Standardize on $cal(D)_L union cal(D)_U$ features (no labels), clip at $plus.minus 5 sigma$, PCA (`0–40` dims). Distances: *Euclidean*, *Cosine*, Cholesky-whitened *Mahalanobis* with $hat(Sigma)_L + lambda I$.
+    ],
+    ruled-col("2 · SPARSE GRAPH", accent-col: cobalt)[
+      #set text(size: 9.6pt)
+      Symmetric $k$-NN graph, $k in \{3, 5, 10, 20\}$, $W <- max(W, W^top)$. Diagnostics logged per fit: connected components and nodes unreachable from any label.
+    ],
+    ruled-col("3 · SOLVE & PREDICT", accent-col: forest)[
+      #set text(size: 9.6pt)
+      One sparse-LU factorisation solves all 5 classes at once; `900` fits in the main sweep. Scored on the validation fold; test fold used only for final runs.
+    ],
+  )
 ]
 
 // =============================================================================
-// SLIDE 09: WP3 — GRAPH LP EMPIRICAL RESULTS & HONEST DIAGNOSIS
+// SLIDE 09: WP3 — SENSITIVITY GRAPHS AND WHY THEY LOOK LIKE THIS
 // =============================================================================
-#content-slide("09", "WP3 · Pratyush Somani · Empirical Results", "Graph LP vs. Gold-Only Baselines: Diagnostics & Limits")[
+#content-slide("09", "WP3 · Pratyush Somani · Sensitivity", "What Moves the Score: Labels, k, and PCA Dimension")[
+  #fig-frame("plots/wp3_summary.png", height: 5.3cm, caption: [Run 2 sweep (3 distances × 5 PCA dims × 4 k × 5 gold fractions × 3 seeds, validation fold). Left: best config per distance, mean ± std over 3 seeds. Middle and right: η = 10%.])
+  #v(0.2em)
   #grid(
-    columns: (1.32fr, 0.84fr),
+    columns: (1fr, 1fr, 1fr),
+    gutter: 1.0em,
+    ruled-col("LEFT · F1 vs LABEL SCARCITY", accent-col: ink)[
+      #set text(size: 9.8pt)
+      *Observed:* Euclidean / PCA 5 / $k = 3$ rises `0.246 → 0.341` (2% → 50%); biggest jump 2% → 5%. The three metrics overlap within error bars.
+      *Why:* at 2% only `≈180` labels are revealed (`≈6` HYP, F1 `0.018`) — some classes are barely seeded, so there is little to diffuse.
+    ],
+    ruled-col("MIDDLE · SMALLER k IS BETTER", accent-col: cobalt)[
+      #set text(size: 9.8pt)
+      *Observed:* Euclidean falls `0.299 → 0.245` from $k = 3$ to $k = 20$ (mean over η, PCA); Mahalanobis is lowest at every $k$.
+      *Reason:* classes overlap (WP1 k-Means purity `≈0.58`), so each extra neighbour is more likely to cross a class boundary; small $k$ keeps diffusion local. The guide expected the opposite.
+    ],
+    ruled-col("RIGHT · FEW PCA DIMS WIN", accent-col: forest)[
+      #set text(size: 9.8pt)
+      *Observed:* Euclidean peaks at PCA 5 (`0.294`) and fades to `0.267` at 40; Cosine is flat (`0.272`); Mahalanobis `0.290` at PCA 5 but `0.211` raw, `0.224` at 40.
+      *Reason:* extra components add mostly noise; whitening gives noisy directions full weight, and $hat(Sigma)_L$ is estimated from only `≈180–4,500` labeled points.
+    ],
+  )
+]
+
+// =============================================================================
+// SLIDE 10: WP3 — CONTROLS: DOES THE UNLABELED POOL HELP?
+// =============================================================================
+#content-slide("10", "WP3 · Pratyush Somani · Controls", "Does the Unlabeled Pool Help? Controls & Ruled-Out Explanations")[
+  #grid(
+    columns: (1.15fr, 1fr),
     gutter: 1.3em,
     [
-      #fig-frame("plots/wp3_vs_baselines.png", height: 7.4cm)
-      #v(0.28em)
-      #eq-strip(accent-col: ink, bg: paper-alt)[
-        #text(size: 10.3pt)[*Held-Out Test (Fold 10):* LP (`Euc, PCA=5, k=3`) scores `0.258` (2%) `-> 0.352` (50%), vs. Balanced RBF-SVM `0.352 -> 0.471` and Gold-only kNN control `0.306 -> 0.348`.]
+      #ruled-col("CONTROL · LP vs GOLD-ONLY kNN ON THE SAME EMBEDDING (TEST FOLD)", accent-col: cobalt)[
+        #set text(size: 10pt)
+        #table(
+          columns: (auto, 1fr, 1fr, 1fr),
+          align: center,
+          inset: 4pt,
+          stroke: none,
+          fill: (x, y) => if y == 0 { paper-alt } else { none },
+          [*$eta$*], [*Graph LP*], [*Gold-only kNN*], [*Gain*],
+          [2%], [`0.258`], [`0.306`], [`−0.048`],
+          [5%], [`0.306`], [`0.319`], [`−0.013`],
+          [10%], [`0.309`], [`0.328`], [`−0.019`],
+          [20%], [`0.315`], [`0.325`], [`−0.010`],
+          [50%], [`0.352`], [`0.348`], [`+0.003`],
+        )
+        #v(0.1em)
+        Same scaler, PCA 5, $k = 3$; they differ only in whether the Pool is used. Validation: gain negative at 2%, 5%, 20%, positive at 10%, 50%. *No consistent benefit from the Pool.*
+      ]
+      #v(0.3em)
+      #ruled-col("WHERE LP LOSES · PER-CLASS F1 AT η = 10% (VAL)", accent-col: ink)[
+        #set text(size: 9.8pt)
+        #table(
+          columns: (auto, 1fr, 1fr, 1fr, 1fr, 1fr),
+          align: center,
+          inset: 3.5pt,
+          stroke: none,
+          fill: (x, y) => if y == 0 { paper-alt } else { none },
+          [], [*NORM*], [*MI*], [*STTC*], [*CD*], [*HYP*],
+          [*Graph LP*], [`0.720`], [`0.181`], [`0.106`], [`0.375`], [`0.179`],
+          [*LogReg (unw.)*], [`0.775`], [`0.260`], [`0.262`], [`0.427`], [`0.199`],
+        )
+        #v(0.1em)
+        Unweighted LogReg wins on all five classes; the gap is largest on *STTC* and *MI*.
       ]
     ],
     [
       #ruled-col("RIGOROUS DIAGNOSTIC ELIMINATION", accent-col: vermilion, bg: vermilion-bg)[
-        #set text(size: 10.5pt)
-        LP beats raw `5-NN` (`+3 to +6 pp`) yet *trails Gold LogReg/SVM by 8–13 pp* (`0.254–0.373` vs `0.344–0.489`). Ablations rule out trivial bugs:
-        - *Not connectivity:* Only `1–2` graph components (`0–5` of `~4,000` nodes isolated).
-        - *Not CMN:* Class-mass normalization shifts mean F1 by only `+0.0014`.
-        - *Not PCA loss:* Raw 84-d LP (`0.216 -> 0.361`) still trails unweighted LogReg.
-        - *Not unlabeled count:* Adding unused Gold nodes *hurt* (`0.267` vs `0.300`).
+        #set text(size: 10.4pt)
+        LP is below the gold-only supervised baselines (next slide). Checks that rule out simple explanations:
+        - *Not connectivity:* only `1–2` graph components; `0–5` of `≈4,000` nodes unreachable.
+        - *Not class imbalance handling:* class-mass normalization changes mean F1 by only `+0.0014` (60 paired runs).
+        - *Not PCA information loss:* LP on all 84 raw features (`0.216 → 0.361`) still trails unweighted LogReg.
+        - *Not too few unlabeled points:* adding the unused Gold records *hurt* (`0.267` vs `≈0.30`, η ∈ {5, 10, 20}%).
       ]
-      #v(0.35em)
-      #ruled-col("ROOT CAUSE", accent-col: ink)[
-        #text(size: 10.4pt)[Heavy ECG class overlap + `62.5% NORM` dominance lets majority labels flood minority `MI`/`STTC` through diffusion; finite-sample $hat(Sigma)_L$ noise hurts Mahalanobis beyond `PCA = 5`.]
+      #v(0.3em)
+      #eq-strip(accent-col: ink, bg: paper-alt)[
+        #text(size: 10pt)[*Reading:* the extra unlabeled data gives no consistent gain, and more of it made things worse — so the limit is not the amount of data or a bug in the solver.]
       ]
     ],
   )
 ]
 
+// =============================================================================
+// SLIDE 11: WP3 — GOLD-ONLY BASELINES
+// =============================================================================
+#content-slide("11", "WP3 · Pratyush Somani · Baselines", "Graph LP vs. Gold-Only Supervised Baselines")[
+  #grid(
+    columns: (1.32fr, 0.84fr),
+    gutter: 1.3em,
+    [
+      #fig-frame("plots/wp3_vs_baselines.png", height: 6.2cm)
+      #v(0.2em)
+      #text(size: 9.6pt)[
+        #table(
+          columns: (auto, 1fr, 1fr, 1fr, 1fr, 1fr, 1fr),
+          align: center,
+          inset: 3pt,
+          stroke: none,
+          fill: (x, y) => if y == 0 { paper-alt } else { none },
+          [*Test $eta$*], [*LogReg bal.*], [*LogReg unw.*], [*SVM bal.*], [*Naive Bayes*], [*5-NN*], [*Graph LP*],
+          [2%], [`0.335`], [`0.341`], [`0.352`], [`0.340`], [`0.219`], [*`0.258`*],
+          [10%], [`0.407`], [`0.408`], [`0.416`], [`0.384`], [`0.276`], [*`0.309`*],
+          [50%], [`0.457`], [`0.429`], [`0.471`], [`0.325`], [`0.311`], [*`0.352`*],
+        )
+      ]
+    ],
+    [
+      #ruled-col("WHAT THE COMPARISON SHOWS", accent-col: vermilion, bg: vermilion-bg)[
+        #set text(size: 10.2pt)
+        - Balanced LogReg / SVM beat LP at *every* $eta$ on both folds, by `≈8–13 pp`.
+        - Unweighted LogReg still beats LP, so class weighting is not the reason.
+        - LP only beats raw `5-NN` (and Naive Bayes at 50%).
+        - Naive Bayes peaks at 10–20% then falls; LogReg and SVM keep improving (the generative vs discriminative pattern; not tested here).
+        - LP numbers are the best of a grid tuned on validation; baselines are untuned, so the gap is not inflated.
+      ]
+      #v(0.3em)
+      #ruled-col("WHY?", accent-col: ink)[
+        #set text(size: 10pt)
+        *Class overlap* in the 84 hand-crafted features (WP1 purity `≈0.58`) weakens "close ECGs share a label"; supervised models can learn to ignore uninformative directions, distances cannot. The Pool also differs from Gold (`28%` vs `10%` MI).
+      ]
+    ],
+  )
+]
 // =============================================================================
 // SLIDE 10: WP4 — CO-TRAINING THEORY AND ALGORITHM
 // =============================================================================
@@ -642,7 +755,7 @@
     [
       #ruled-col("THEORY · TWO USEFUL, NON-REDUNDANT VIEWS", accent-col: cobalt, bg: cobalt-bg)[
         #set text(size: 9.5pt)
-        Each view should be predictive, with errors that are not perfectly correlated. View 1 uses temporal/morphology features (`0:42`); View 2 uses spectral/wavelet features (`42:84`). This split provides complementary evidence, but does not prove statistical independence.
+        Each view should be predictive, with errors that are not perfectly correlated. View 1 uses temporal/morphology features (`0:42`); View 2 uses spectral/wavelet features (`42:84`). The split offers different descriptions of the same ECG, but does not prove statistical independence. Co-Training tests whether one view can add useful evidence beyond the labels already available to the other.
       ]
       #v(0.18em)
       #eq-strip(accent-col: cobalt, bg: paper-alt)[
@@ -653,10 +766,10 @@
       #v(0.18em)
       #ruled-col("HISTOGRAM BOOSTING + CO-TRAINING ALGORITHM", accent-col: forest, bg: forest-bg)[
         #set text(size: 9.0pt)
-        + Per view, HistGradientBoosting bins features and fits `100` depth-`4` trees to log-loss gradients (learning rate `0.06`, minimum leaf `10`, L2 `1`).
-        + Train each view on its gold labels. Each round, propose at most `10` remaining examples per class above confidence `0.72`.
-        + Transfer a proposal only if the peer view predicts the same class; weight it by `0.35 × confidence` (gold weight `1`).
-        + Remove accepted records, then retrain both views. Stop when no examples are added or after `12` rounds; average probabilities at prediction.
+        + Train one HistGradientBoosting model per view on the gold labels; each uses `100` depth-`4` trees (learning rate `0.06`, minimum leaf `10`, L2 `1`).
+        + In each round, a view proposes up to `10` remaining examples per class with confidence at least `0.72`, limiting majority-class dominance.
+        + Transfer a proposal only when the peer view predicts the same class; give it weight `0.35 × confidence`, while every verified gold example keeps weight `1`.
+        + Remove accepted records from the pool and retrain both views. Stop if no examples are added or after `12` rounds, then average the two probability outputs.
       ]
     ],
     [
@@ -681,15 +794,15 @@
     [
       #ruled-col("READ THE CURVES", accent-col: cobalt, bg: cobalt-bg)[
         #set text(size: 9.8pt)
-        Macro-F1 comparison; the unlabeled pool contributes features only, not machine labels.
+        Validation fold 9 (`1,642` ECGs); the pool contributes features only, not its machine-generated labels. The reference is a supervised ensemble with the same two views and classifier family.
         #v(0.18em)
-        - *Largest lift:* `+0.071` at `5%` gold vs. the supervised two-view baseline.
-        - *Not universal:* gains at `2–20%`; at `50%`, `0.470` vs. `0.478`.
-        - At `2%`, MI F1 gains `+0.152`; other classes need not follow.
+        - *Macro-F1 gain over baseline:* `+0.051`, `+0.071`, `+0.035`, and `+0.018` at `2–20%` gold; the largest lift is at `5%`.
+        - At `2%`, macro-F1 rises `0.315 → 0.365` even as accuracy falls by `0.012`; MI F1 rises `0.212 → 0.363`, illustrating that accuracy and class-balanced F1 can tell different stories.
+        - *Diminishing return:* at `50%`, the result is `0.470` vs. `0.478` for the baseline (`−0.008`), when more verified labels leave less room for pseudo-labels to help.
       ]
       #v(0.18em)
       #text(size: 9.1pt, fill: ink-muted)[
-        *Takeaway:* the clearest benefit is in the scarce-label regime.
+        *Takeaway:* the strongest gain appears with scarce labels, but neither the improvement nor the class-wise benefit is universal.
       ]
     ],
     fig-frame("plots/cotraining_f1_only.png", height: 10.2cm, caption: [Validation macro-F1 by gold fraction.]),
@@ -706,7 +819,7 @@
     [
       #ruled-col("THEORY · LOW-DENSITY SEPARATION", accent-col: cobalt, bg: cobalt-bg)[
         #set text(size: 9.4pt)
-        A supervised SVM maximizes the margin on labeled data. Under the *cluster assumption*, class boundaries should pass through low-density gaps. TSVM uses unlabeled features to seek such boundaries; overlap and class imbalance can violate the assumption.
+        A supervised SVM maximizes the margin on labeled data. Under the *cluster assumption*, class boundaries should pass through low-density gaps. TSVM uses unlabeled features to seek such boundaries; overlap and class imbalance can violate the assumption. Unlike Co-Training, it does not exchange examples between views: it starts from one classifier's provisional labels and revises them as the boundary changes.
       ]
       #v(0.16em)
       #eq-strip(accent-col: cobalt, bg: paper-alt)[
@@ -746,19 +859,21 @@
     [
       #ruled-col("LATEST VALIDATION SWEEP", accent-col: cobalt, bg: cobalt-bg)[
         #set text(size: 9.7pt)
-        TSVM edges the gold-only SVM at every fraction: `+0.005`, `+0.006`, `+0.026`, `+0.031`, `+0.003` from `2%` to `50%`.
+        Validation fold 9, compared with an inductive balanced SVM whose scaler is fit on gold data only. TSVM's Macro-F1 gains at `2%`, `5%`, `10%`, `20%`, and `50%` are `+0.005`, `+0.006`, `+0.026`, `+0.031`, and `+0.003`, respectively.
         #v(0.16em)
-        Largest lift: `0.458 → 0.488` at `20%` gold.
+        The largest lift is `0.458 → 0.488` at `20%` gold. Positive differences at the other fractions are small, so the result is a consistent direction of change, not a large gain at every setting.
       ]
       #v(0.18em)
       #ruled-col("CLASS-WISE TRADE-OFF · 10% GOLD", accent-col: vermilion, bg: vermilion-bg)[
         #text(size: 9.4pt)[
-          NORM and CD improve; MI and STTC dip; HYP is nearly unchanged. TSVM uses `1,540` support vectors vs. `848`—a more complex boundary, not proof of margin collapse.
+          At `10%`, NORM F1 rises `0.646 → 0.739` and CD `0.428 → 0.515`; MI falls `0.393 → 0.352`, STTC `0.325 → 0.315`, and HYP is nearly unchanged (`0.372 → 0.371`). The NORM and CD gains more than offset the MI and STTC dips in the macro average (`+0.026`).
+          #v(0.12em)
+          The model uses `1,540` support vectors vs. `848` for the baseline. This signals a more complex fitted boundary; by itself it is not evidence of better generalization or margin collapse.
         ]
       ]
       #v(0.16em)
       #text(size: 9.0pt, fill: ink-muted)[
-        Aggregate gains can hide class-level losses.
+        *Interpretation:* margin filtering and class balancing are safeguards; performance still depends on which classes supply reliable boundary examples.
       ]
     ],
     fig-frame("plots/tsvm_per_class_f1_eta10.png", height: 10.2cm, caption: [Per-class validation F1 at `10%` gold.]),
