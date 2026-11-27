@@ -73,8 +73,10 @@
     #text(font: serif-font, size: 21.5pt, weight: "bold", fill: ink, title)
     #v(0.18em)
     #line(length: 100%, stroke: 1.15pt + ink)
-    #v(0.38em)
+    #v(0.48em)
+    #v(0.65fr)
     #body
+    #v(0.65fr)
   ]
 }
 
@@ -247,7 +249,7 @@
     ]
   ]
 
-  #v(0.45em)
+  #v(1fr)
   #grid(
     columns: (1fr, 1fr, 1fr),
     gutter: 1.0em,
@@ -262,11 +264,11 @@
     ],
   )
 
-  #v(0.55em)
+  #v(1fr)
   #text(font: mono-font, size: 9.4pt, weight: "bold", fill: ink, tracking: 0.06em)[QUESTIONS THIS PROJECT ANSWERS]
   #v(0.2em)
   #line(length: 100%, stroke: 0.8pt + ink)
-  #v(0.4em)
+  #v(1fr)
   #grid(
     columns: (1fr, 1fr),
     gutter: 0.9em,
@@ -294,25 +296,29 @@
     pipe-step("4 · PCA", "Compress to 20 PCs", [Keeps about `86%` of the variance.], accent-col: vermilion),
   )
 
-  #v(0.4em)
+  #v(1fr)
   #grid(
     columns: (1.1fr, 1fr),
     gutter: 1.3em,
     align: horizon,
-    fig-frame("plots/pca_explained_variance.png", height: 4.7cm, caption: [Cumulative variance explained by principal components.]),
-    ruled-col("WHAT PCA TELLS US", accent-col: ink)[
-      #set text(size: 10.8pt)
-      - *Fast compression:* `5` PCs capture `~52%`, `10` capture `~70%`, `20` capture `~86%`.
-      - *Why 20:* `90%` would need `~30–35` PCs. `20` keeps most of the information and filters drift and noise.
-      - *Result:* a clean `21,837 × 84` matrix, ready for all later methods.
+    [
+      #align(center, image("plots/wp1_fig1a_ecg_primer.png", width: 100%, height: 5.05cm, fit: "contain"))
+      #v(0.10em)
+      #align(center, text(size: 8.8pt, fill: ink-muted)[ECG waves, R-peaks, and HRV (schematic).])
+    ],
+    [
+      #align(center, image("plots/pca_explained_variance.png", width: 100%, height: 5.05cm, fit: "contain"))
+      #v(0.10em)
+      #align(center, text(size: 8.8pt, fill: ink-muted)[Cumulative variance explained by principal components.])
     ],
   )
 
-  #v(0.35em)
-  #eq-strip(accent-col: vermilion, bg: vermilion-bg)[
-    #text(size: 10.6pt)[
-      *Also noticed:* `MI` is `10.4%` of the gold set but `28.0%` of the pool, so the machine labels are biased (revisited in WP5).
-    ]
+  #v(1fr)
+  #ruled-col("WHAT PCA TELLS US", accent-col: ink)[
+    #set text(size: 10.8pt)
+    - *Fast compression:* `5` PCs capture `~52%`, `10` capture `~70%`, `20` capture `~86%`.
+    - *Why 20:* `90%` would need `~30–35` PCs. `20` keeps most of the information and filters drift and noise.
+    - *Result:* a clean `21,837 × 84` matrix, ready for all later methods.
   ]
 ]
 
@@ -322,22 +328,18 @@
 #content-slide("03", "WP1 · Neev Rathod · k-Means (Q1)", "Clustering Shows Overlapping Classes and the Cost of Sensor Noise")[
   #grid(
     columns: (1.15fr, 1fr),
-    gutter: 1.3em,
+    gutter: 1.0em,
     [
-      #fig-frame("plots/noise_cluster_purity.png", height: 5.9cm, caption: [k-Means ($k=5$) purity on clean vs. noisy ECGs (baseline drift, static).])
-      #v(0.35em)
-      #ruled-col("WHAT WE DID", accent-col: cobalt, bg: cobalt-bg)[
-        #set text(size: 10.4pt)
-        Ran k-Means with `5` clusters (one per diagnosis) on gold folds 1–8, using `3` distances (Euclidean, Cosine, Mahalanobis) on raw and PCA features. *Purity* = how well clusters match the true diagnoses.
-      ]
-    ],
-    [
+      #align(center, image("plots/noise_cluster_purity.png", width: 100%, height: 4.55cm, fit: "contain"))
+      #v(0.08em)
+      #align(center, text(size: 8.6pt, fill: ink-muted)[k-Means ($k=5$) purity on clean vs. noisy ECGs (baseline drift, static).])
+      #v(0.2em)
       #ruled-col("PURITY & ADJUSTED RAND INDEX", accent-col: ink)[
-        #set text(size: 10.0pt)
+        #set text(size: 9.6pt)
         #table(
           columns: (1.6fr, 0.8fr, 0.8fr),
           stroke: none,
-          inset: (x: 4pt, y: 3.8pt),
+          inset: (x: 3pt, y: 2.5pt),
           fill: (x, y) => if y == 3 or y == 6 { cobalt-bg } else { none },
           table.hline(stroke: 1.1pt + ink),
           table.header([*Variant*], [*Purity*], [*ARI*]),
@@ -351,13 +353,23 @@
           table.hline(stroke: 1.1pt + ink),
         )
       ]
-      #v(0.4em)
+      #v(0.2em)
+      #ruled-col("WHAT WE DID", accent-col: cobalt, bg: cobalt-bg)[
+        #set text(size: 9.6pt)
+        Ran k-Means with `5` clusters (one per diagnosis) on gold folds 1–8, using `3` distances (Euclidean, Cosine, Mahalanobis) on raw and PCA features. *Purity* = how well clusters match the true diagnoses.
+      ]
+    ],
+    [
+      #align(center, image("plots/wp1_fig5b_feature_overlap.png", width: 100%, height: 5.35cm, fit: "contain"))
+      #v(0.08em)
+      #align(center, text(size: 8.6pt, fill: ink-muted)[PTB-XL feature overlap in the first two principal components.])
+      #v(0.22em)
       #ruled-col("WHAT IT TELLS US", accent-col: vermilion, bg: vermilion-bg)[
-        #set text(size: 10.4pt)
-        - *Classes overlap:* purity stays `~0.58`, so `MI`/`STTC` and `NORM`/`HYP` mix in feature space. Geometry alone is not enough.
-        - *Noise hurts:* noisy ECGs are less pure in *every* variant (up to `5.1 pp` lower).
-        - *Fixes help:* Mahalanobis raises ARI `2.2×` (`0.049 -> 0.108`); PCA also helps (`0.049 -> 0.072`).
-        - *So:* we need labels, which leads to semi-supervised learning.
+        #set text(size: 10.0pt)
+        - *Purity varies with signal quality:* Clean-flagged records have higher purity than records flagged for baseline drift or static noise across the tested variants.
+        - *PCA doesn't clearly improve purity:* Dimensionality reduction alone doesn't consistently improve cluster quality.
+        - *Classes overlap:* Low ARI values suggest the clusters don't strongly separate all five diagnoses.
+        - *So:* These are clues about the feature space—not proof that artifacts caused the differences or that a diagnostic model will perform the same way. This points to the need for labels, leading to semi-supervised learning.
       ]
     ],
   )
@@ -462,7 +474,7 @@
     ],
   )
 
-  #v(0.24em)
+  #v(1fr)
   #eq-strip(accent-col: cobalt, bg: cobalt-bg)[
     #text(size: 10.6pt)[
       *Minimise* $E(F) = 1/2 sum_(i,j) W_(i j) norm(F_i - F_j)^2$ s.t. $F_L = Y_L$
@@ -471,7 +483,7 @@
     ]
   ]
 
-  #v(0.24em)
+  #v(1fr)
   #grid(
     columns: (1fr, 1fr, 1fr),
     gutter: 1.0em,
@@ -495,7 +507,7 @@
 // =============================================================================
 #content-slide("09", "WP3 · Pratyush Somani · Sensitivity", "What Moves the Score: Labels, k, and PCA Dimension")[
   #fig-frame("plots/wp3_summary.png", height: 5.3cm, caption: [Run 2 sweep (3 distances × 5 PCA dims × 4 k × 5 gold fractions × 3 seeds, validation fold). Left: best config per distance, mean ± std over 3 seeds. Middle and right: η = 10%.])
-  #v(0.2em)
+  #v(1fr)
   #grid(
     columns: (1fr, 1fr, 1fr),
     gutter: 1.0em,
@@ -629,13 +641,13 @@
         #set text(size: 9.5pt)
         Each view should be predictive, with errors that are not perfectly correlated. View 1 uses temporal/morphology features (`0:42`); View 2 uses spectral/wavelet features (`42:84`). The split offers different descriptions of the same ECG, but does not prove statistical independence. Co-Training tests whether one view can add useful evidence beyond the labels already available to the other.
       ]
-      #v(0.18em)
+      #v(0.48em)
       #eq-strip(accent-col: cobalt, bg: paper-alt)[
         #text(size: 9.6pt)[
           Transfer only when confidence is at least `0.72` *and* the other view predicts the same class.
         ]
       ]
-      #v(0.18em)
+      #v(0.48em)
       #ruled-col("HISTOGRAM BOOSTING + CO-TRAINING ALGORITHM", accent-col: forest, bg: forest-bg)[
         #set text(size: 9.0pt)
         + Train one HistGradientBoosting model per view on the gold labels; each uses `100` depth-`4` trees (learning rate `0.06`, minimum leaf `10`, L2 `1`).
@@ -672,7 +684,7 @@
         - At `2%`, macro-F1 rises `0.315 → 0.365` even as accuracy falls by `0.012`; MI F1 rises `0.212 → 0.363`, illustrating that accuracy and class-balanced F1 can tell different stories.
         - *Diminishing return:* at `50%`, the result is `0.470` vs. `0.478` for the baseline (`−0.008`), when more verified labels leave less room for pseudo-labels to help.
       ]
-      #v(0.18em)
+      #v(0.48em)
       #text(size: 9.1pt, fill: ink-muted)[
         *Takeaway:* the strongest gain appears with scarce labels, but neither the improvement nor the class-wise benefit is universal.
       ]
@@ -735,7 +747,7 @@
         #v(0.16em)
         The largest lift is `0.458 → 0.488` at `20%` gold. Positive differences at the other fractions are small, so the result is a consistent direction of change, not a large gain at every setting.
       ]
-      #v(0.18em)
+      #v(0.48em)
       #ruled-col("CLASS-WISE TRADE-OFF · 10% GOLD", accent-col: vermilion, bg: vermilion-bg)[
         #text(size: 9.4pt)[
           At `10%`, NORM F1 rises `0.646 → 0.739` and CD `0.428 → 0.515`; MI falls `0.393 → 0.352`, STTC `0.325 → 0.315`, and HYP is nearly unchanged (`0.372 → 0.371`). The NORM and CD gains more than offset the MI and STTC dips in the macro average (`+0.026`).
@@ -869,43 +881,58 @@
 ]
 
 // =============================================================================
-// SLIDE 17: CONCLUSIONS & ANSWERS TO ALL FOUR RESEARCH QUESTIONS (TANUJ)
+// SLIDE 17: FINAL CONCLUSION
 // =============================================================================
-#content-slide("17", "WP5 · Tanuj Yadav · Synthesis & Key Takeaways", "Answers to Proposal Questions & Architectural Summary")[
-  #v(0.15fr)
-  #grid(
-    columns: (1fr, 1fr),
-    gutter: 1.3em,
-    row-gutter: 0.85em,
-    ruled-col("Q1 · SENSOR ARTIFACTS (WP1)", accent-col: cobalt, bg: cobalt-bg)[
-      #text(size: 11.0pt)[
-        Physical baseline drift and static noise cut $k$-Means purity by `~5 pp`. *Raw Mahalanobis* doubles ARI (`0.049 -> 0.108`) via covariance whitening; *20-PC PCA* filters drift while retaining `~86%` variance.
+#content-slide("17", "Final conclusion", "Conclusion")[
+  #grid(columns: (1.15fr, 1fr), gutter: 1.2em,
+    [
+      #block(width: 100%, height: 3.15cm, fill: forest-bg, stroke: (left: 3pt + forest), inset: (x: 10pt, y: 8pt))[
+        #grid(columns: (0.8fr, 1.6fr), column-gutter: 0.6em, align: horizon,
+          text(font: mono-font, size: 9.0pt, weight: "bold", fill: forest)[Q1 · WHICH MODEL PERFORMS BEST?],
+          text(size: 11.0pt, fill: ink)[Noise-aware EM leads with `2–10%` gold labels (macro F1 `0.462`, `0.453`, `0.456`). Gold-only SVM leads at `20–50%` (`0.459`, `0.489`).],
+        )
+      ]
+      #v(0.35em)
+      #block(width: 100%, height: 3.15cm, fill: vermilion-bg, stroke: (left: 3pt + vermilion), inset: (x: 10pt, y: 8pt))[
+        #grid(columns: (0.8fr, 1.6fr), column-gutter: 0.6em, align: horizon,
+          text(font: mono-font, size: 9.0pt, weight: "bold", fill: vermilion)[Q2 · WHAT HAPPENS WHEN NOISE DECREASES?],
+          text(size: 11.0pt, fill: ink)[Decision-tree macro F1 rises from `0.351` at `45%` flips to `0.582` with clean labels. Structured class-pair noise still degrades every tested classifier.],
+        )
+      ]
+      #v(0.35em)
+      #block(width: 100%, height: 3.15cm, fill: cobalt-bg, stroke: (left: 3pt + cobalt), inset: (x: 10pt, y: 8pt))[
+        #grid(columns: (0.8fr, 1.6fr), column-gutter: 0.6em, align: horizon,
+          text(font: mono-font, size: 9.0pt, weight: "bold", fill: cobalt)[Q3 · CAN WE FIND LABEL-ERROR PATTERNS?],
+          text(size: 11.0pt, fill: ink)[EM estimates `NORM → MI` (`9.41%`), `STTC → MI` (`9.18%`), and `HYP → NORM` (`6.19%`) among `3,968` machine-labeled ECGs; these patterns need clinical review.],
+        )
       ]
     ],
-    ruled-col("Q2 · SUPERVISED FAILURE MODES (WP2)", accent-col: vermilion, bg: vermilion-bg)[
-      #text(size: 11.0pt)[
-        Unpruned `DT` collapses worst (`-38.5%`, `640` leaves) via noise memorization; `RBF-SVM` holds F1 (`-7.6%`) at the cost of `~2,015` SVs (`96%` of train). Generative `GNB` averages noise globally (`-6.3%` drop).
-      ]
-    ],
-    ruled-col("Q3 · DISCARD VS. CORRECT (WP3–WP5)", accent-col: forest, bg: forest-bg)[
-      #text(size: 11.0pt)[
-        Graph LP (`0.246–0.341`) and TSVM (`0.388–0.499`) remain sensitive to overlap and `NORM` dominance. Co-Training's largest gain over its two-view baseline is `+0.071` at `5%` gold; its validation F1 peaks at `0.470` with `50%` gold. *Latent-Noise EM wins all 20/20 cells* (`0.411–0.462` F1) and beats Gold SVM for $eta <= 10%$.
-      ]
-    ],
-    ruled-col("Q4 · AUDITING THE MACHINE (WP5)", accent-col: ink, bg: paper-alt)[
-      #text(size: 11.0pt)[
-        EM cuts synthetic Frobenius error $norm(hat(T)-T_"true")_F$ by `63%` (`0.364 -> 0.135`) and uncovers real PTB-XL software bias: *NORM $arrow.r$ MI (`9.4%`)*, *STTC $arrow.r$ MI (`9.2%`)*, and *missed HYP (`6.2%` $arrow.r$ NORM)*.
+    [
+      #block(width: 100%, height: 10.05cm, fill: white, stroke: 0.7pt + rule-color, radius: 2pt, inset: (x: 8pt, y: 9pt))[
+        #text(font: mono-font, size: 8.8pt, weight: "bold", fill: forest, tracking: 0.04em)[PTB-XL VALIDATION · MACRO F1]
+        #v(0.25em)
+        #text(size: 8.8pt, fill: ink-muted)[By verified-label budget; bold values mark the best result.]
+        #v(0.35em)
+        #set text(size: 8.9pt)
+        #table(
+          columns: (1.55fr, 0.85fr, 0.85fr, 0.85fr, 0.85fr, 0.85fr),
+          inset: (x: 1.2pt, y: 7pt),
+          stroke: none,
+          align: (left, center, center, center, center, center),
+          fill: (x, y) => if (y == 1 and x >= 1 and x <= 3) or (y == 2 and x >= 4) { forest-bg } else if y == 0 { paper-alt },
+          [*Method*], [*2%*], [*5%*], [*10%*], [*20%*], [*50%*],
+          [Noise-aware EM], [*0.462*], [*0.453*], [*0.456*], [0.441], [0.456],
+          [Gold-only SVM], [0.344], [0.400], [0.429], [*0.459*], [*0.489*],
+          [Co-training], [0.355], [0.351], [0.346], [0.340], [0.326],
+          [Graph LP], [0.183], [0.253], [0.266], [0.293], [0.340],
+        )
+        #v(1fr)
+        #ruled-col("MACRO-F1 TAKEAWAY", accent-col: ink, bg: paper-alt)[
+          #text(size: 10.0pt)[At `2%` gold, EM leads SVM by `0.118`; at `50%`, SVM leads EM by `0.033`. The best choice changes as verified data grows.]
+        ]
       ]
     ],
   )
-
-  #v(0.45fr)
-  #eq-strip(accent-col: ink, bg: paper-alt)[
-    #text(size: 11.1pt)[
-      *Computation & Methodology Takeaway:* Across *90* supervised breakdown fits (WP2), *1,149* sparse-LU & baseline fits (WP3), *12*-round Co-Training + $C_U$-annealed TSVMs (WP4), and *27* L-BFGS-B EM fits (WP5), *modeling annotator noise outperforms discarding it* whenever weak labels retain diagnostic signal.
-    ]
-  ]
-  #v(0.15fr)
 ]
 
 // =============================================================================
@@ -917,7 +944,7 @@
   #text(font: serif-font, size: 21.5pt, weight: "bold", fill: ink)[References]
   #v(0.18em)
   #line(length: 100%, stroke: 1.15pt + ink)
-  #v(0.50fr)
+  #v(1fr)
 
   #set text(size: 10.5pt)
   #grid(
@@ -927,7 +954,7 @@
       #grid(
         columns: (2.6em, 1fr),
         column-gutter: 0.35em,
-        row-gutter: 0.85em,
+        row-gutter: 1.12em,
         text(font: mono-font, weight: "bold", fill: vermilion)[\[1\]],
         [S. Rogers and M. Girolami, _A First Course in Machine Learning_, 2nd ed., CRC Press, 2015.],
         text(font: mono-font, weight: "bold", fill: vermilion)[\[2\]],
@@ -944,7 +971,7 @@
       #grid(
         columns: (2.6em, 1fr),
         column-gutter: 0.35em,
-        row-gutter: 0.85em,
+        row-gutter: 1.12em,
         text(font: mono-font, weight: "bold", fill: vermilion)[\[6\]],
         [A. P. Dawid and A. M. Skene, "Maximum likelihood estimation of observer error-rates using the EM algorithm," _JRSS Series C_, vol. 28, no. 1, pp. 20–28, 1979.],
         text(font: mono-font, weight: "bold", fill: vermilion)[\[7\]],
